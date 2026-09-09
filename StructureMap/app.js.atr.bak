@@ -1,0 +1,676 @@
+// Structure map — a survey of where the trend switched, and where it tried and
+// failed.
+//
+//   15m  over the last 7 days
+//   5m   over the last 5 days
+//   1m   over the last 24 hours
+//
+// Swings are labelled HH / HL / LH / LL and the trend is read from the last
+// high against the last low, exactly as in StructureAlign. What this tool adds
+// is the history of that reading: every time it flipped, and — the part that is
+// usually invisible — every time it started to flip and didn't.
+//
+// A reversal ATTEMPT begins the moment a directional trend stops being
+// directional. It resolves one of two ways:
+//   SWITCH  — the reading reaches the opposite direction
+//   FAILED  — the reading returns to the direction it came from
+//
+// Failed attempts are the ones worth seeing. They are the pullbacks that looked
+// like reversals, and on a chart they leave no trace once price moves on.
+//
+// This is a historical survey, so it reads candle history rather than ticks:
+// a week of 15m is ~300,000 ticks at a 2s clock, far past what the feed serves,
+// while 672 candles covers it exactly. Price is drawn as a high-low band, not
+// as bars.
+
+// --- What each panel covers ------------------------------------------------
+
+const SPECS = [
+    { key: 'm15', label: '15m', granularity: 900, count: 672, span: 'last 7 days' },
+    { key: 'm5', label: '5m', granularity: 300, count: 1440, span: 'last 5 days' },
+    { key: 'm1', label: '1m', granularity: 60, count: 1440, span: 'last 24 hours' },
+];
+
+// --- State -----------------------------------------------------------------
+
+let socket = null;
+let activeSymbol = '';
+let pipSize = 0.01;
+let decimals = 2;
+let kFilter = 2.0;        // swing filter = kFilter x ATR(14) of that timeframe
+let loading = false;
+
+const DATA = {};          // key -> { candles, swings, analysis, atr, th }
+
+// --- DOM -------------------------------------------------------------------
+
+const el = (id) => document.getElementById(id);
+
+const assetSelect = el('asset-select');
+const loadBtn = el('load-btn');
+const exportBtn = el('export-btn');
+const kSlider = el('k-slider'), kVal = el('k-val');
+const connectionStatus = el('connection-status');
+const noticeBar = el('notice-bar');
+const summaryRow = el('summary-row');
+const eventBody = el('event-body');
+const eventCount = el('event-count');
+
+const canvases = {};
+for (const s of SPECS) {
+    const cv = el(`${s.key}-canvas`);
+    canvases[s.key] = { cv, cx: cv.getContext('2d') };
+}
+
+const COL = {
+    grid: '#21262d', axis: '#8b949e', up: '#3fb950', dn: '#f85149',
+    ac: '#58a6ff', gold: '#d4a017', mut: '#6e7681', band: 'rgba(125,133,144,.22)',
+    contract: '#a371f7',
+};
+const TREND_COL = {
+    BULLISH: '#3fb950', BEARISH: '#f85149',
+    EXPANDING: '#d4a017', CONTRACTING: '#a371f7', FORMING: '#30363d',
+};
+
+function notify(message, kind = 'info') {
+    noticeBar.textContent = message;
+    noticeBar.className = `notice ${kind}`;
+    noticeBar.hidden = !message;
+    if (kind === 'error') console.error(message);
+}
+
+const fmtP = (p) => p.toFixed(decimals);
+const pad2 = (n) => String(n).padStart(2, '0');
+
+function fmtStamp(sec) {
+    const d = new Date(sec * 1000);
+    return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function fmtDur(sec) {
+    if (sec < 3600) return `${Math.round(sec / 60)}m`;
+    if (sec < 86400) return `${(sec / 3600).toFixed(1)}h`;
+    return `${(sec / 86400).toFixed(1)}d`;
+}
+
+// --- Connection ------------------------------------------------------------
+
+loadBtn.addEventListener('click', () => loadAll());
+
+async function ensureSocket() {
+    if (socket?.isOpen) return socket;
+    socket = await DerivAPI.connectPublic();
+    socket.onClose = (event, closedByUs) => {
+        if (closedByUs) return;
+        connectionStatus.textContent = 'Disconnected';
+        connectionStatus.className = 'status-badge disconnected';
+    };
+    return socket;
+}
+
+/**
+ * Every tradable market, not just synthetics — a historical structure survey is
+ * more interesting on an underlying that has participants in it.
+ */
+async function populateSymbols() {
+    const previous = assetSelect.value;
+    const response = await socket.send({ active_symbols: 'brief' });
+    const groups = new Map();
+    for (const s of response.active_symbols || []) {
+        const code = s.underlying_symbol || s.symbol;
+        if (!code) continue;
+        const market = s.market || 'other';
+        if (!groups.has(market)) groups.set(market, []);
+        groups.get(market).push({
+            code,
+            name: s.underlying_symbol_name || s.display_name || code,
+            pip: s.pip_size,
+            open: s.exchange_is_open,
+        });
+    }
+    if (!groups.size) return;
+
+    assetSelect.innerHTML = '';
+    for (const [market, list] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
+        const group = document.createElement('optgroup');
+        group.label = market.replace(/_/g, ' ');
+        for (const s of list.sort((a, b) => a.name.localeCompare(b.name))) {
+            const option = document.createElement('option');
+            option.value = s.code;
+            option.textContent = s.open ? s.name : `${s.name} (closed)`;
+            option.dataset.pipSize = s.pip;
+            group.appendChild(option);
+        }
+        assetSelect.appendChild(group);
+    }
+    if ([...assetSelect.options].some((o) => o.value === previous)) assetSelect.value = previous;
+}
+
+// The gateway caps a candle request at 1000 rows no matter what `count` asks
+// for, so anything longer than that has to be walked back a page at a time.
+const PAGE = 1000;
+
+/**
+ * Fetch `count` candles ending now, paging backwards as needed.
+ *
+ * A closed market returns nothing for `end: 'latest'`, so the first anchor walks
+ * back a day at a time until it lands inside a session. Without that, forex and
+ * commodities come back empty at weekends with no explanation.
+ */
+async function fetchCandles(symbol, granularity, count) {
+    const norm = (rows) => rows.map((c) => ({
+        t: Number(c.epoch), o: +c.open, h: +c.high, l: +c.low, c: +c.close,
+    })).filter((c) => [c.t, c.o, c.h, c.l, c.c].every(Number.isFinite));
+
+    // First page: find a working anchor.
+    let out = [];
+    let end = 'latest';
+    for (let back = 0; back <= 10 && !out.length; back++) {
+        if (back) end = String(Math.floor(Date.now() / 1000) - back * 86400);
+        try {
+            const r = await socket.send({
+                ticks_history: symbol, end, count: Math.min(count, PAGE), style: 'candles', granularity,
+            });
+            out = norm(r?.candles || []);
+        } catch { /* try an earlier anchor */ }
+    }
+    if (!out.length) return [];
+
+    // Remaining pages: keep stepping back from the oldest row we hold.
+    const seen = new Set(out.map((c) => c.t));
+    let guard = 0;
+    while (out.length < count && guard++ < 20) {
+        const oldest = out[0].t;
+        let rows;
+        try {
+            const r = await socket.send({
+                ticks_history: symbol, end: String(oldest - 1),
+                count: Math.min(count - out.length, PAGE), style: 'candles', granularity,
+            });
+            rows = norm(r?.candles || []);
+        } catch { break; }
+
+        const fresh = rows.filter((c) => !seen.has(c.t) && c.t < oldest);
+        if (!fresh.length) break;                 // history exhausted
+        for (const c of fresh) seen.add(c.t);
+        out = fresh.concat(out);
+    }
+
+    return out.sort((a, b) => a.t - b.t).slice(-count);
+}
+
+async function loadAll() {
+    if (loading) return;
+    loading = true;
+    loadBtn.disabled = true;
+    loadBtn.textContent = 'Loading…';
+
+    try {
+        await ensureSocket();
+        if (!assetSelect.options.length) await populateSymbols();
+
+        activeSymbol = assetSelect.value;
+        pipSize = Number(assetSelect.selectedOptions[0]?.dataset.pipSize) || 0.01;
+        decimals = Math.max(2, String(pipSize).split('.')[1]?.length || 2);
+
+        connectionStatus.textContent = 'Loading history…';
+        connectionStatus.className = 'status-badge';
+
+        for (const spec of SPECS) {
+            notify(`Fetching ${spec.label} — ${spec.span}…`);
+            const candles = await fetchCandles(activeSymbol, spec.granularity, spec.count);
+            DATA[spec.key] = { spec, candles };
+        }
+
+        const empty = SPECS.filter((s) => !DATA[s.key].candles.length);
+        if (empty.length === SPECS.length) {
+            notify(`No history returned for ${activeSymbol}. If it is a closed market, history may be unavailable.`, 'error');
+            connectionStatus.textContent = 'No data';
+            connectionStatus.className = 'status-badge disconnected';
+            return;
+        }
+
+        recompute();
+        const total = SPECS.reduce((n, s) => n + DATA[s.key].candles.length, 0);
+        notify(`Mapped ${total.toLocaleString()} periods across three timeframes.` +
+            (empty.length ? ` (${empty.map((s) => s.label).join(', ')} returned nothing.)` : ''));
+        connectionStatus.textContent = `Mapped · ${activeSymbol}`;
+        connectionStatus.className = 'status-badge connected';
+    } catch (error) {
+        notify(error.message, 'error');
+        connectionStatus.textContent = 'Failed';
+        connectionStatus.className = 'status-badge disconnected';
+    } finally {
+        loading = false;
+        loadBtn.disabled = false;
+        loadBtn.textContent = 'Load / refresh';
+    }
+}
+
+// --- Swings ----------------------------------------------------------------
+
+/** Average true range — the swing filter rides on it so one knob fits all TFs. */
+function atr(cs, period = 14) {
+    if (cs.length < 2) return 0;
+    let sum = 0, n = 0;
+    for (let i = Math.max(1, cs.length - period); i < cs.length; i++) {
+        sum += Math.max(cs[i].h - cs[i].l, Math.abs(cs[i].h - cs[i - 1].c), Math.abs(cs[i].l - cs[i - 1].c));
+        n++;
+    }
+    return n ? sum / n : 0;
+}
+
+/**
+ * ZigZag over highs and lows. A swing only turns once price has retraced `th`
+ * from the running extreme; the leg still in progress is returned separately
+ * and never labelled, because an unconfirmed swing has nothing to compare to.
+ */
+function zigzag(cs, th) {
+    const piv = [];
+    if (cs.length < 3 || !(th > 0)) return { piv, running: null };
+
+    let hi = cs[0].h, hiI = 0, lo = cs[0].l, loI = 0;
+    let dir = null, ep = 0, ei = 0;
+
+    for (let k = 1; k < cs.length; k++) {
+        const c = cs[k];
+        if (dir === null) {
+            if (c.h > hi) { hi = c.h; hiI = k; }
+            if (c.l < lo) { lo = c.l; loI = k; }
+            if (hi - lo >= th) {
+                if (hiI < loI) { piv.push({ k: hiI, p: hi, type: 'H' }); dir = 'dn'; ep = lo; ei = loI; }
+                else { piv.push({ k: loI, p: lo, type: 'L' }); dir = 'up'; ep = hi; ei = hiI; }
+            }
+            continue;
+        }
+        if (dir === 'up') {
+            if (c.h > ep) { ep = c.h; ei = k; }
+            else if (ep - c.l >= th) { piv.push({ k: ei, p: ep, type: 'H' }); dir = 'dn'; ep = c.l; ei = k; }
+        } else {
+            if (c.l < ep) { ep = c.l; ei = k; }
+            else if (c.h - ep >= th) { piv.push({ k: ei, p: ep, type: 'L' }); dir = 'up'; ep = c.h; ei = k; }
+        }
+    }
+    const running = dir ? { k: ei, p: ep, type: dir === 'up' ? 'H' : 'L', live: true } : null;
+    return { piv, running };
+}
+
+/** The whole trend read, from two labels. Mixed pairs mean "no trend". */
+function trendFromLabels(hLabel, lLabel) {
+    if (!hLabel || !lLabel || hLabel === 'H' || lLabel === 'L') return { trend: 'FORMING', bias: 'RANGE' };
+    if (hLabel === 'HH' && lLabel === 'HL') return { trend: 'BULLISH', bias: 'BULL' };
+    if (hLabel === 'LH' && lLabel === 'LL') return { trend: 'BEARISH', bias: 'BEAR' };
+    if (hLabel === 'HH' && lLabel === 'LL') return { trend: 'EXPANDING', bias: 'RANGE' };
+    return { trend: 'CONTRACTING', bias: 'RANGE' };
+}
+
+function labelSwings(piv) {
+    let prevH = null, prevL = null;
+    for (const p of piv) {
+        if (p.type === 'H') { p.label = prevH === null ? 'H' : (p.p > prevH ? 'HH' : 'LH'); prevH = p.p; }
+        else { p.label = prevL === null ? 'L' : (p.p > prevL ? 'HL' : 'LL'); prevL = p.p; }
+    }
+    return piv;
+}
+
+// --- Switches, and the ones that failed ------------------------------------
+
+/**
+ * Walk the swings and replay how the trend reading evolved, then classify every
+ * departure from a directional trend.
+ *
+ * The reading can never jump straight from BULLISH to BEARISH: each swing
+ * updates only one half of the pair, so there is always at least one mixed step
+ * in between. That intermediate step is the "attempt", and what happens next is
+ * the whole question — it either completes into the opposite trend (SWITCH) or
+ * falls back into the one it came from (FAILED).
+ */
+function analyseTrend(piv, candles) {
+    const timeline = [];
+    let lastH = null, lastL = null;
+    for (const p of piv) {
+        if (p.type === 'H') lastH = p; else lastL = p;
+        const { trend, bias } = trendFromLabels(lastH?.label, lastL?.label);
+        timeline.push({ k: p.k, t: candles[p.k]?.t, trend, bias, price: p.p, label: p.label });
+    }
+
+    const events = [];
+    let anchor = null;          // the directional trend currently in force
+    let anchorAt = null;        // where it was established
+    let attempt = null;         // where the current departure from it began
+
+    for (const pt of timeline) {
+        const directional = pt.trend === 'BULLISH' || pt.trend === 'BEARISH' ? pt.trend : null;
+
+        if (!directional) {
+            if (anchor && !attempt) attempt = pt;
+            continue;
+        }
+        if (!anchor) { anchor = directional; anchorAt = pt; attempt = null; continue; }
+
+        if (directional === anchor) {
+            if (attempt) {
+                events.push({
+                    kind: 'FAILED', from: anchor, to: anchor,
+                    startK: attempt.k, startT: attempt.t, startPrice: attempt.price,
+                    endK: pt.k, endT: pt.t, endPrice: pt.price,
+                    via: attempt.trend,
+                });
+                attempt = null;
+            }
+        } else {
+            const start = attempt || pt;
+            events.push({
+                kind: 'SWITCH', from: anchor, to: directional,
+                startK: start.k, startT: start.t, startPrice: start.price,
+                endK: pt.k, endT: pt.t, endPrice: pt.price,
+                heldFor: anchorAt ? pt.t - anchorAt.t : null,
+                via: start.trend,
+            });
+            anchor = directional; anchorAt = pt; attempt = null;
+        }
+    }
+
+    const switches = events.filter((e) => e.kind === 'SWITCH');
+    const failures = events.filter((e) => e.kind === 'FAILED');
+    const holds = switches.map((e) => e.heldFor).filter(Number.isFinite);
+
+    return {
+        timeline, events, switches, failures,
+        current: anchor,
+        currentSince: anchorAt?.t ?? null,
+        pending: attempt,
+        stats: {
+            switches: switches.length,
+            failures: failures.length,
+            // Of every attempt to reverse, how many actually went through?
+            completionRate: events.length ? switches.length / events.length : null,
+            medianHold: holds.length ? holds.slice().sort((a, b) => a - b)[holds.length >> 1] : null,
+        },
+    };
+}
+
+function recompute() {
+    for (const spec of SPECS) {
+        const entry = DATA[spec.key];
+        if (!entry || !entry.candles.length) continue;
+        const a = atr(entry.candles, 14);
+        const th = a > 0 ? kFilter * a : kFilter * pipSize * 10;
+        const { piv, running } = zigzag(entry.candles, th);
+        entry.th = th;
+        entry.atr = a;
+        entry.swings = labelSwings(piv);
+        entry.running = running;
+        entry.analysis = analyseTrend(entry.swings, entry.candles);
+    }
+    renderSummary();
+    renderEvents();
+    drawAll();
+}
+
+// --- Canvas ----------------------------------------------------------------
+
+function sizeCanvas(canvas, context, cssHeight) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(50, canvas.clientWidth || 300);
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function sizeAll() {
+    for (const s of SPECS) sizeCanvas(canvases[s.key].cv, canvases[s.key].cx, 300);
+    drawAll();
+}
+window.addEventListener('resize', sizeAll);
+
+function drawAll() {
+    for (const s of SPECS) drawPanel(s);
+}
+
+function drawPanel(spec) {
+    const { cv, cx } = canvases[spec.key];
+    const W = cv.clientWidth, H = 300;
+    const m = { l: 6, r: 74, t: 26, b: 40 };   // bottom leaves room for the ribbon
+    cx.clearRect(0, 0, W, H);
+
+    const entry = DATA[spec.key];
+    if (!entry || !entry.candles.length) {
+        cx.fillStyle = COL.axis; cx.font = '13px sans-serif';
+        cx.fillText(`${spec.label} — no data loaded`, 20, H / 2);
+        return;
+    }
+
+    const cs = entry.candles;
+    let lo = Infinity, hi = -Infinity;
+    for (const c of cs) { if (c.l < lo) lo = c.l; if (c.h > hi) hi = c.h; }
+    const pad = (hi - lo) * 0.06 || pipSize * 10;
+    lo -= pad; hi += pad;
+
+    const plotW = W - m.l - m.r, plotH = H - m.t - m.b;
+    const X = (k) => m.l + (k / Math.max(1, cs.length - 1)) * plotW;
+    const Y = (p) => m.t + (1 - (p - lo) / (hi - lo)) * plotH;
+
+    // Grid
+    cx.strokeStyle = COL.grid; cx.lineWidth = 1;
+    cx.fillStyle = COL.axis; cx.font = '10px ui-monospace, monospace';
+    for (let g = 0; g <= 4; g++) {
+        const price = lo + ((hi - lo) * g) / 4;
+        const y = Y(price);
+        cx.beginPath(); cx.moveTo(m.l, y); cx.lineTo(W - m.r, y); cx.stroke();
+        cx.fillText(fmtP(price), W - m.r + 5, y + 3);
+    }
+
+    // Day boundaries, so a week actually reads as a week
+    let lastDay = null;
+    for (let k = 0; k < cs.length; k++) {
+        const d = new Date(cs[k].t * 1000).getDate();
+        if (lastDay === null) { lastDay = d; continue; }
+        if (d !== lastDay) {
+            const x = X(k);
+            cx.strokeStyle = 'rgba(139,148,158,.18)'; cx.setLineDash([2, 4]);
+            cx.beginPath(); cx.moveTo(x, m.t); cx.lineTo(x, m.t + plotH); cx.stroke();
+            cx.setLineDash([]);
+            cx.fillStyle = 'rgba(139,148,158,.6)'; cx.font = '9px ui-monospace, monospace';
+            cx.fillText(`${pad2(d)}/${pad2(new Date(cs[k].t * 1000).getMonth() + 1)}`, x + 3, m.t + 10);
+            lastDay = d;
+        }
+    }
+
+    // Price as a high-low band — the envelope, not bars
+    cx.fillStyle = COL.band;
+    cx.beginPath();
+    for (let k = 0; k < cs.length; k++) { const x = X(k), y = Y(cs[k].h); if (k) cx.lineTo(x, y); else cx.moveTo(x, y); }
+    for (let k = cs.length - 1; k >= 0; k--) cx.lineTo(X(k), Y(cs[k].l));
+    cx.closePath(); cx.fill();
+
+    const piv = entry.swings || [];
+    const running = entry.running;
+    const analysis = entry.analysis;
+
+    // The zigzag, coloured by the trend reading in force on each leg
+    const drawn = running ? [...piv, running] : piv;
+    if (drawn.length > 1) {
+        for (let j = 1; j < drawn.length; j++) {
+            const a = drawn[j - 1], b = drawn[j];
+            const state = analysis.timeline[Math.min(j, analysis.timeline.length - 1)];
+            cx.strokeStyle = TREND_COL[state?.trend] || COL.mut;
+            cx.globalAlpha = b.live ? 0.4 : 0.95;
+            cx.lineWidth = 1.8;
+            cx.beginPath(); cx.moveTo(X(a.k), Y(a.p)); cx.lineTo(X(b.k), Y(b.p)); cx.stroke();
+            cx.globalAlpha = 1;
+        }
+    }
+
+    // Swing points, and labels wherever there is room for one. Spacing is
+    // measured in pixels rather than counted, so a label is dropped only when it
+    // would actually collide — widening the chart brings them back.
+    const MIN_LABEL_GAP = 26;
+    let lastLabelX = -Infinity;
+    cx.textAlign = 'center';
+    for (const p of drawn) {
+        const x = X(p.k), y = Y(p.p), isHigh = p.type === 'H';
+        cx.globalAlpha = p.live ? 0.4 : 1;
+        cx.fillStyle = isHigh ? COL.up : COL.dn;
+        cx.beginPath(); cx.arc(x, y, 2.6, 0, Math.PI * 2); cx.fill();
+        if (p.label && x - lastLabelX >= MIN_LABEL_GAP) {
+            cx.font = 'bold 9px ui-monospace, monospace';
+            cx.fillStyle = p.label[0] === 'H' ? COL.up : COL.dn;
+            cx.fillText(p.label, x, isHigh ? y - 7 : y + 13);
+            lastLabelX = x;
+        }
+        cx.globalAlpha = 1;
+    }
+
+    // Switches and failed switches
+    for (const e of analysis.events) {
+        const x = X(e.endK);
+        const isSwitch = e.kind === 'SWITCH';
+        const col = isSwitch ? (e.to === 'BULLISH' ? COL.up : COL.dn) : COL.gold;
+        cx.strokeStyle = col;
+        cx.lineWidth = isSwitch ? 1.6 : 1;
+        cx.setLineDash(isSwitch ? [] : [3, 3]);
+        cx.globalAlpha = isSwitch ? 0.85 : 0.6;
+        cx.beginPath(); cx.moveTo(x, m.t); cx.lineTo(x, m.t + plotH); cx.stroke();
+        cx.setLineDash([]); cx.globalAlpha = 1;
+
+        cx.fillStyle = col;
+        cx.font = `bold ${isSwitch ? 9 : 8}px ui-monospace, monospace`;
+        cx.fillText(isSwitch ? (e.to === 'BULLISH' ? '▲SWITCH' : '▼SWITCH') : 'failed',
+            x, isSwitch ? m.t - 4 : m.t + plotH + 11);
+    }
+    cx.textAlign = 'left';
+
+    // Trend ribbon: the reading over time, as a strip
+    const ribbonY = m.t + plotH + 16, ribbonH = 10;
+    cx.fillStyle = '#0d1117';
+    cx.fillRect(m.l, ribbonY, plotW, ribbonH);
+    const tl = analysis.timeline;
+    for (let j = 0; j < tl.length; j++) {
+        const x0 = X(tl[j].k);
+        const x1 = j + 1 < tl.length ? X(tl[j + 1].k) : X(cs.length - 1);
+        cx.fillStyle = TREND_COL[tl[j].trend] || COL.mut;
+        cx.globalAlpha = tl[j].trend === 'BULLISH' || tl[j].trend === 'BEARISH' ? 0.85 : 0.4;
+        cx.fillRect(x0, ribbonY, Math.max(1, x1 - x0), ribbonH);
+        cx.globalAlpha = 1;
+    }
+    cx.strokeStyle = COL.grid; cx.lineWidth = 1;
+    cx.strokeRect(m.l, ribbonY, plotW, ribbonH);
+
+    // Header
+    const cur = analysis.current;
+    cx.fillStyle = COL.axis; cx.font = 'bold 11px ui-monospace, monospace';
+    cx.fillText(spec.label, m.l + 2, 14);
+    cx.fillStyle = COL.mut; cx.font = '9px ui-monospace, monospace';
+    cx.fillText(spec.span, m.l + 40, 14);
+    let hx = m.l + 40 + cx.measureText(spec.span).width + 12;
+    cx.fillStyle = TREND_COL[cur] || COL.mut; cx.font = 'bold 10px ui-monospace, monospace';
+    cx.fillText(cur || 'NO TREND', hx, 14);
+    hx += cx.measureText(cur || 'NO TREND').width + 12;
+    cx.fillStyle = COL.mut; cx.font = '9px ui-monospace, monospace';
+    cx.fillText(
+        `${cs.length} periods · filter ${entry.th.toFixed(decimals)} (${kFilter.toFixed(2)}×ATR) · ` +
+        `${piv.length} swings · ${analysis.stats.switches} switches · ${analysis.stats.failures} failed`,
+        hx, 14);
+}
+
+// --- Summary and event list ------------------------------------------------
+
+function renderSummary() {
+    summaryRow.innerHTML = SPECS.map((spec) => {
+        const entry = DATA[spec.key];
+        if (!entry?.analysis) {
+            return `<div class="sumcard"><div class="sumtf">${spec.label}</div>
+                <div class="summuted">no data</div></div>`;
+        }
+        const a = entry.analysis, s = a.stats;
+        const cls = a.current === 'BULLISH' ? 'bull' : a.current === 'BEARISH' ? 'bear' : 'range';
+        const rate = s.completionRate === null ? '—' : `${(100 * s.completionRate).toFixed(0)}%`;
+        const since = a.currentSince ? fmtDur(Math.floor(Date.now() / 1000) - a.currentSince) : '—';
+        return `<div class="sumcard ${cls}">
+            <div class="sumtf">${spec.label} <span class="summuted">${spec.span}</span></div>
+            <div class="sumtrend ${cls}">${a.current || 'NO TREND'}</div>
+            <div class="sumsince">held ${since}${a.pending ? ' · <span class="warn">reversal attempt live</span>' : ''}</div>
+            <div class="sumgrid">
+                <div><b>${s.switches}</b><span>switches</span></div>
+                <div><b class="gold">${s.failures}</b><span>failed</span></div>
+                <div><b>${rate}</b><span>completed</span></div>
+                <div><b>${s.medianHold ? fmtDur(s.medianHold) : '—'}</b><span>median run</span></div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function allEvents() {
+    const rows = [];
+    for (const spec of SPECS) {
+        const a = DATA[spec.key]?.analysis;
+        if (!a) continue;
+        for (const e of a.events) rows.push({ ...e, tf: spec.label });
+    }
+    return rows.sort((x, y) => (y.endT || 0) - (x.endT || 0));
+}
+
+function renderEvents() {
+    const rows = allEvents();
+    eventCount.textContent = `${rows.length} event${rows.length === 1 ? '' : 's'}`;
+    if (!rows.length) {
+        eventBody.innerHTML = '<tr class="empty"><td colspan="7">Nothing mapped yet.</td></tr>';
+        return;
+    }
+    eventBody.innerHTML = rows.slice(0, 200).map((e) => {
+        const isSwitch = e.kind === 'SWITCH';
+        const dir = isSwitch ? (e.to === 'BULLISH' ? 'bull' : 'bear') : 'fail';
+        const what = isSwitch
+            ? `${e.from === 'BULLISH' ? '▲' : '▼'} → ${e.to === 'BULLISH' ? '▲ BULLISH' : '▼ BEARISH'}`
+            : `held ${e.from === 'BULLISH' ? '▲ BULLISH' : '▼ BEARISH'}`;
+        return `<tr>
+            <td>${fmtStamp(e.endT)}</td>
+            <td class="tf">${e.tf}</td>
+            <td class="kind ${dir}">${isSwitch ? 'SWITCH' : 'FAILED'}</td>
+            <td>${what}</td>
+            <td class="muted">via ${e.via || '—'}</td>
+            <td>${fmtP(e.endPrice)}</td>
+            <td class="muted">${e.startT && e.endT ? fmtDur(e.endT - e.startT) : '—'}</td>
+        </tr>`;
+    }).join('');
+}
+
+// --- Controls --------------------------------------------------------------
+
+kSlider.addEventListener('input', (e) => {
+    kFilter = parseFloat(e.target.value);
+    kVal.textContent = `${kFilter.toFixed(2)} × ATR`;
+    recompute();
+});
+
+assetSelect.addEventListener('change', () => loadAll());
+
+exportBtn.addEventListener('click', () => {
+    const rows = allEvents();
+    if (!rows.length) { notify('Nothing mapped yet.', 'error'); return; }
+    const out = ['time_iso,symbol,timeframe,kind,from,to,via,price,duration_sec'];
+    for (const e of [...rows].reverse()) {
+        out.push([
+            new Date(e.endT * 1000).toISOString(), activeSymbol, e.tf, e.kind,
+            e.from, e.to, e.via || '', e.endPrice,
+            e.startT && e.endT ? e.endT - e.startT : '',
+        ].join(','));
+    }
+    const url = URL.createObjectURL(new Blob([out.join('\n')], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeSymbol || 'structure'}_switches_${rows.length}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+});
+
+sizeAll();
+(async () => {
+    try {
+        await ensureSocket();
+        await populateSymbols();
+        if ([...assetSelect.options].some((o) => o.value === 'R_100')) assetSelect.value = 'R_100';
+        await loadAll();
+    } catch (error) {
+        notify(error.message, 'error');
+    }
+})();

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Charsac Technology — Structure Alignment (15m · 5m · 1m)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <h1>Charsac Technology — Structure Alignment</h1>
+        <div class="sub">
+            15m sets the bias · 5m confirms it · 1m triggers the entry. All three are cut from the same
+            minute candles, so they can never disagree about what price actually did.
+        </div>
+    </header>
+
+    <!-- Connection -->
+    <section class="card">
+        <h2>Asset</h2>
+        <div class="row">
+            <select id="asset-select" style="flex:2;min-width:220px">
+                <option value="R_100">Volatility 100 Index</option>
+                <option value="R_75">Volatility 75 Index</option>
+                <option value="R_50">Volatility 50 Index</option>
+                <option value="R_25">Volatility 25 Index</option>
+                <option value="R_10">Volatility 10 Index</option>
+            </select>
+            <button id="connect-btn">Connect &amp; Stream</button>
+            <button class="sec" id="clear-btn">Clear</button>
+            <button class="sec" id="export-btn">Export signals CSV</button>
+        </div>
+        <div class="status-row">
+            <span id="connection-status" class="status-badge disconnected">Disconnected</span>
+            <span class="muted">Market data is public — no token required. Nothing here trades.</span>
+        </div>
+        <div id="notice-bar" class="notice" hidden></div>
+    </section>
+
+    <!-- Settings -->
+    <section class="card">
+        <h2>Structure settings</h2>
+        <div class="row">
+            <label title="Completed 15m boxes retained behind the current one, so structure has swings to compare against">
+                Prior 15m boxes
+                <input type="range" id="boxes-slider" min="4" max="32" step="1" value="12">
+                <span id="boxes-val" class="mono">12</span>
+            </label>
+            <label title="Swing filter as a multiple of that timeframe's own ATR(14) — one knob that scales correctly across 1m, 5m and 15m">
+                Swing filter
+                <input type="range" id="k-slider" min="0.15" max="2" step="0.05" value="0.55">
+                <span id="k-val" class="mono">0.55 × ATR</span>
+            </label>
+            <label title="How recent a 1m break must be to still count as a live trigger">
+                Trigger freshness
+                <input type="range" id="fresh-slider" min="1" max="6" step="1" value="3">
+                <span id="fresh-val" class="mono">3 × 1m</span>
+            </label>
+            <label class="chk"><input type="checkbox" id="sound-chk" checked> Alert sound</label>
+            <button class="sec" id="freeze-btn">❚❚ Freeze view</button>
+        </div>
+    </section>
+
+    <!-- The verdict -->
+    <section class="align" id="align-panel">
+        <div class="align-head">
+            <div class="align-verdict" id="align-verdict">Waiting for data…</div>
+            <div class="align-meta" id="align-meta">—</div>
+        </div>
+        <div class="tfrow">
+            <div class="tfbadge" id="badge-15">
+                <div class="tfname">15m <span class="role">bias</span></div>
+                <div class="tfbias" id="bias-15">—</div>
+                <div class="tfsw" id="sw-15">—</div>
+                <div class="tfev" id="ev-15">—</div>
+            </div>
+            <div class="tfbadge" id="badge-5">
+                <div class="tfname">5m <span class="role">confirmation</span></div>
+                <div class="tfbias" id="bias-5">—</div>
+                <div class="tfsw" id="sw-5">—</div>
+                <div class="tfev" id="ev-5">—</div>
+            </div>
+            <div class="tfbadge" id="badge-1">
+                <div class="tfname">1m <span class="role">trigger</span></div>
+                <div class="tfbias" id="bias-1">—</div>
+                <div class="tfsw" id="sw-1">—</div>
+                <div class="tfev" id="ev-1">—</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Live metrics -->
+    <div class="stats">
+        <div class="cell"><div class="k">Spot</div><div class="v ac" id="stat-spot">—</div></div>
+        <div class="cell"><div class="k">15m open</div><div class="v" id="stat-open">—</div></div>
+        <div class="cell"><div class="k">15m high</div><div class="v up" id="stat-high">—</div></div>
+        <div class="cell"><div class="k">15m low</div><div class="v dn" id="stat-low">—</div></div>
+        <div class="cell"><div class="k">15m range (u)</div><div class="v" id="stat-range">—</div></div>
+        <div class="cell"><div class="k">Box closes in</div><div class="v" id="stat-left">—</div></div>
+        <div class="cell"><div class="k">5m in box</div><div class="v" id="stat-m5">—</div></div>
+        <div class="cell"><div class="k">1m in box</div><div class="v" id="stat-m1">—</div></div>
+        <div class="cell"><div class="k">Ticks</div><div class="v" id="stat-ticks">0</div></div>
+        <div class="cell"><div class="k">Signals</div><div class="v gold" id="stat-signals">0</div></div>
+    </div>
+
+    <!-- The nested window: 1 x 15m = 3 x 5m = 15 x 1m, one shared price axis -->
+    <div class="secthead">The current 15m box, sliced three ways <span class="muted">— identical span, one price axis; dim outlines are slots not yet formed</span></div>
+    <canvas id="box-canvas" height="380"></canvas>
+
+    <!-- Structure per timeframe -->
+    <div class="secthead">Structure per timeframe <span class="muted">— shaded band is the current 15m box</span></div>
+    <canvas id="tf15-canvas" height="190"></canvas>
+    <canvas id="tf5-canvas" height="190"></canvas>
+    <canvas id="tf1-canvas" height="190"></canvas>
+
+    <!-- Alignment log -->
+    <div class="secthead">Alignment log <span class="muted">— every moment all three agreed</span></div>
+    <section class="card logcard">
+        <table class="log">
+            <thead>
+                <tr><th>Time</th><th>Dir</th><th>Price</th><th>Trigger</th><th>15m / 5m / 1m</th><th>Since (u)</th></tr>
+            </thead>
+            <tbody id="log-body">
+                <tr class="empty"><td colspan="6">No alignment yet.</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <div class="leg">
+        <b>Swings:</b> ● <span class="up">green</span> = swing high, ● <span class="dn">red</span> = swing low.
+        <b>HH/HL</b> = bullish structure, <b>LH/LL</b> = bearish.
+        &nbsp;·&nbsp; <b>BOS</b> (break of structure) = the trend takes out its own last swing — continuation.
+        <b>CHoCH</b> (change of character) = the <i>first</i> break the other way — the trend flipping.
+        &nbsp;·&nbsp; Dashed <span class="up">green</span>/<span class="dn">red</span> lines are the live swing levels: the
+        prices that, if broken, produce the next BOS or CHoCH.
+        &nbsp;·&nbsp; A <b>signal</b> needs 15m and 5m agreeing <i>and</i> a fresh 1m break in that same direction.
+        &nbsp;·&nbsp; 1 <b>u</b> = <span id="unit-note" class="mono">—</span>.
+    </div>
+</div>
+<script src="../deriv-api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

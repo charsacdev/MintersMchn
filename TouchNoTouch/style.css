@@ -1,0 +1,385 @@
+:root {
+    --bg: #0d1117;
+    --pan: #161b22;
+    --bd: #30363d;
+    --tx: #c9d1d9;
+    --mut: #8b949e;
+    --up: #3fb950;
+    --dn: #f85149;
+    --ac: #58a6ff;
+    --gold: #d4a017;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background: var(--bg);
+    color: var(--tx);
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    padding: 16px;
+}
+
+.wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+}
+
+header {
+    margin-bottom: 20px;
+}
+
+h1 {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.sub {
+    color: var(--mut);
+    font-size: 12px;
+    margin-top: 4px;
+    line-height: 1.5;
+}
+
+.card {
+    background: var(--pan);
+    border: 1px solid var(--bd);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+}
+
+.card h2 {
+    font-size: 11px;
+    margin-bottom: 10px;
+    color: var(--mut);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+}
+
+.row + .row {
+    margin-top: 10px;
+}
+
+select,
+input[type=password],
+input[type=text],
+input[type=number] {
+    background: var(--bg);
+    color: var(--tx);
+    border: 1px solid var(--bd);
+    border-radius: 7px;
+    padding: 8px 12px;
+    font-size: 13px;
+    outline: none;
+}
+
+select:focus,
+input:focus {
+    border-color: var(--ac);
+}
+
+select:disabled,
+input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+button {
+    background: var(--ac);
+    color: #06121f;
+    border: 0;
+    border-radius: 7px;
+    padding: 8px 16px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 13px;
+    transition: opacity 0.15s;
+}
+
+button:hover:not(:disabled) {
+    opacity: 0.9;
+}
+
+button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+button.sec {
+    background: var(--bg);
+    color: var(--tx);
+    border: 1px solid var(--bd);
+}
+
+label {
+    color: var(--mut);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+input[type=range] {
+    accent-color: var(--ac);
+}
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 10px;
+    font-size: 13px;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.status-badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.status-badge.disconnected { background: rgba(244, 67, 54, 0.15); color: var(--dn); }
+.status-badge.connected { background: rgba(76, 175, 80, 0.15); color: var(--up); }
+.status-badge.preview { background: rgba(88, 166, 255, 0.15); color: var(--ac); }
+
+.muted { color: var(--mut); font-size: 12px; }
+.muted.warn { color: var(--gold); }
+
+.notice {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--bd);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--mut);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.notice.error { border-color: rgba(248, 81, 73, 0.4); color: var(--dn); }
+.notice.ok { border-color: rgba(63, 185, 80, 0.4); color: var(--up); }
+
+/* Barrier + quote strip ---------------------------------------------------- */
+
+.barrier-row {
+    border-top: 1px dashed var(--bd);
+    padding-top: 10px;
+}
+
+.quote-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--bd);
+    border-radius: 7px;
+}
+
+.quote {
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* Two complementary legs imply probabilities that must sum to 1 in a fair
+   market. The excess over 100% is the house margin, and it gets its own chip. */
+.edge-badge {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 20px;
+    border: 1px solid var(--bd);
+    cursor: help;
+}
+
+.edge-badge.ok { color: var(--mut); border-color: var(--bd); }
+
+.edge-badge.hot {
+    color: var(--gold);
+    border-color: rgba(212, 160, 23, 0.5);
+    background: rgba(212, 160, 23, 0.1);
+}
+
+.buy-row {
+    margin-top: 12px;
+}
+
+button.buy {
+    min-width: 150px;
+    padding: 11px 18px;
+    font-size: 14px;
+    letter-spacing: 0.4px;
+}
+
+button.buy.up { background: var(--up); color: #06210c; }
+button.buy.dn { background: var(--dn); color: #2a0505; }
+
+/* Stat grids --------------------------------------------------------------- */
+
+.stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.stats.tight {
+    margin: 0;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.cell {
+    background: var(--pan);
+    border: 1px solid var(--bd);
+    border-radius: 8px;
+    padding: 8px 12px;
+}
+
+.stats.tight .cell {
+    background: var(--bg);
+}
+
+.cell .k {
+    color: var(--mut);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+
+.cell .v {
+    font-family: ui-monospace, monospace;
+    font-size: 16px;
+    font-weight: 600;
+    margin-top: 2px;
+}
+
+.cell .v.sm { font-size: 13px; }
+
+.up { color: var(--up); }
+.dn { color: var(--dn); }
+.gold { color: var(--gold); }
+.mut { color: var(--mut); }
+
+/* Canvas ------------------------------------------------------------------- */
+
+#chart-canvas {
+    background: var(--pan);
+    border: 1px solid var(--bd);
+    border-radius: 10px;
+    display: block;
+    width: 100%;
+    height: 460px;
+}
+
+/* Open contract ------------------------------------------------------------ */
+
+.open-contract {
+    border-color: var(--gold);
+}
+
+/* Path-dependent families only: how far the closest approach got toward the
+   barrier. A full bar means it was reached, which settles the contract. */
+.touch-bar {
+    margin-top: 10px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg);
+    border: 1px solid var(--bd);
+    overflow: hidden;
+}
+
+.touch-fill {
+    height: 100%;
+    width: 0;
+    background: var(--gold);
+    transition: width 0.2s linear;
+}
+
+.touch-fill.win { background: var(--up); }
+.touch-fill.lose { background: var(--dn); }
+
+.verdict {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--bg);
+    border: 1px solid var(--bd);
+    font-size: 12px;
+    color: var(--mut);
+}
+
+.verdict.ok { border-color: rgba(63, 185, 80, 0.5); color: var(--up); }
+.verdict.bad { border-color: rgba(248, 81, 73, 0.5); color: var(--dn); }
+
+/* History ------------------------------------------------------------------ */
+
+.history {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: ui-monospace, monospace;
+}
+
+.history th {
+    text-align: left;
+    color: var(--mut);
+    font-weight: 500;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--bd);
+}
+
+.history td {
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+.history tr.empty td {
+    color: var(--mut);
+    text-align: center;
+    padding: 14px;
+}
+
+.history tr.row-win td:first-child { border-left: 2px solid var(--up); }
+.history tr.row-loss td:first-child { border-left: 2px solid var(--dn); }
+
+/* Family tag + cross-link in the header */
+h1 .tag {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    color: var(--ac);
+    background: rgba(88, 166, 255, 0.12);
+    border: 1px solid rgba(88, 166, 255, 0.3);
+    border-radius: 20px;
+    padding: 2px 9px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+.sub a {
+    color: var(--ac);
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.sub a:hover { text-decoration: underline; }

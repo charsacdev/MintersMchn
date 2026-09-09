@@ -1,0 +1,1082 @@
+// Multi-timeframe structure alignment, read straight off the tick stream.
+//
+// There are no candles anywhere in this file. The tick array IS the series;
+// 15m, 5m and 1m are just three different lengths of it. That is the whole
+// reason the three can never disagree — they are three windows onto one list
+// of quotes, not three separate constructions.
+//
+// 15m sets the bias, 5m confirms it, 1m triggers.
+//
+// Nothing here trades and nothing here needs a token.
+
+// --- Connection state ------------------------------------------------------
+
+let socket = null;
+let stopTicks = null;
+let activeSymbol = '';
+let pipSize = 0.01;
+let decimals = 2;
+
+// --- The series ------------------------------------------------------------
+
+const TS = [];   // epoch ms
+const MID = [];  // spot
+const MAX_TICKS = 60000;
+
+let unit = 0.01;       // 1 "u" — median absolute tick move, for readouts
+let tickSd = 0.01;     // sd of tick moves, for scaling the swing filter
+let tickGapMs = 2000;  // median gap between ticks
+
+// --- Timeframes ------------------------------------------------------------
+
+const TF = { m15: 900000, m5: 300000, m1: 60000 };
+const BOX = TF.m15;    // the box everything is anchored to
+
+// --- Settings --------------------------------------------------------------
+
+let lookMult = 20;     // each panel reads lookMult x its own timeframe
+let kFilter = 0.50;    // major swing filter = kFilter x tickSd x sqrt(ticks in TF)
+let internalDiv = 3.0; // internal filter is the major one divided by this
+let freshTicks = 60;   // a 1m break stays a live trigger for this many ticks
+let soundOn = true;
+let frozen = false;
+
+// Below this there is no structure to read, only noise wearing its clothes.
+const MIN_STRUCT_TICKS = 40;
+
+// --- Derived ---------------------------------------------------------------
+
+let S15 = null, S5 = null, S1 = null;
+let align = { dir: 'RANGE', score: 0, aligned: false, trigger: null };
+let wasAligned = false;
+let freshUntil = 0;
+
+// A live break is decided by price-vs-level, so price sitting on the level
+// flickers it tick to tick. One minute of cooldown is the natural floor.
+const SIGNAL_COOLDOWN_MS = 60000;
+let lastSignalAt = 0;
+let lastSignalDir = null;
+let signalCount = 0;
+
+// --- DOM -------------------------------------------------------------------
+
+const el = (id) => document.getElementById(id);
+
+const connectBtn = el('connect-btn');
+const clearBtn = el('clear-btn');
+const exportBtn = el('export-btn');
+const assetSelect = el('asset-select');
+const lookSlider = el('look-slider'), lookVal = el('look-val');
+const kSlider = el('k-slider'), kVal = el('k-val');
+const innerSlider = el('inner-slider'), innerVal = el('inner-val');
+const freshSlider = el('fresh-slider'), freshVal = el('fresh-val');
+const soundChk = el('sound-chk');
+const freezeBtn = el('freeze-btn');
+const connectionStatus = el('connection-status');
+const noticeBar = el('notice-bar');
+const unitNote = el('unit-note');
+
+const alignPanel = el('align-panel');
+const alignVerdict = el('align-verdict');
+const alignMeta = el('align-meta');
+
+const badges = {
+    m15: { box: el('badge-15'), bias: el('bias-15'), sw: el('sw-15'), st: el('st-15'), ev: el('ev-15') },
+    m5: { box: el('badge-5'), bias: el('bias-5'), sw: el('sw-5'), st: el('st-5'), ev: el('ev-5') },
+    m1: { box: el('badge-1'), bias: el('bias-1'), sw: el('sw-1'), st: el('st-1'), ev: el('ev-1') },
+};
+
+const stats = {
+    spot: el('stat-spot'), open: el('stat-open'), high: el('stat-high'), low: el('stat-low'),
+    range: el('stat-range'), left: el('stat-left'), inbox: el('stat-inbox'), gap: el('stat-gap'),
+    ticks: el('stat-ticks'), signals: el('stat-signals'),
+};
+
+const boxCv = el('box-canvas'), boxCx = boxCv.getContext('2d');
+const tf15Cv = el('tf15-canvas'), tf15Cx = tf15Cv.getContext('2d');
+const tf5Cv = el('tf5-canvas'), tf5Cx = tf5Cv.getContext('2d');
+const tf1Cv = el('tf1-canvas'), tf1Cx = tf1Cv.getContext('2d');
+
+const COL = {
+    grid: '#21262d', axis: '#8b949e', up: '#3fb950', dn: '#f85149',
+    ac: '#58a6ff', gold: '#d4a017', dash: '#6e7681', path: '#7d8590',
+    inner: '#a371f7',   // internal structure — distinct from the major blue
+};
+
+// How internal structure sits against major structure.
+const STATE_COL = {
+    'IN TREND': '#3fb950',
+    PULLBACK: '#d4a017',
+    RESUMING: '#58a6ff',
+    FLAT: '#6e7681',
+};
+
+function notify(message, kind = 'info') {
+    noticeBar.textContent = message;
+    noticeBar.className = `notice ${kind}`;
+    noticeBar.hidden = !message;
+    if (kind === 'error') console.error(message);
+}
+
+const fmtP = (p) => p.toFixed(decimals);
+
+function fmtClock(ms) {
+    const d = new Date(ms), p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// --- Connection ------------------------------------------------------------
+
+connectBtn.addEventListener('click', () => connect());
+
+async function connect() {
+    connectBtn.disabled = true;
+    connectBtn.textContent = 'Connecting…';
+    notify('Connecting to the public market-data gateway…');
+
+    try {
+        if (socket) socket.close();
+        socket = await DerivAPI.connectPublic();
+
+        socket.onClose = (event, closedByUs) => {
+            if (closedByUs) return;
+            connectionStatus.textContent = 'Disconnected';
+            connectionStatus.className = 'status-badge disconnected';
+            connectBtn.textContent = 'Connect & Stream';
+            connectBtn.disabled = false;
+            notify(`Stream dropped (code ${event.code}). Press connect to resume.`, 'error');
+        };
+
+        await populateSymbols();
+        await subscribeToTicks();
+
+        connectionStatus.textContent = 'Streaming (public)';
+        connectionStatus.className = 'status-badge connected';
+        connectBtn.textContent = 'Streaming ✔';
+    } catch (error) {
+        notify(error.message, 'error');
+        connectBtn.textContent = 'Connect & Stream';
+    } finally {
+        connectBtn.disabled = false;
+    }
+}
+
+/** Build the asset list from what is actually open for trading right now. */
+async function populateSymbols() {
+    const previous = assetSelect.value;
+    const response = await socket.send({ active_symbols: 'brief' });
+    const symbols = (response.active_symbols || [])
+        .filter((s) => s.market === 'synthetic_index' && s.exchange_is_open === 1)
+        .map((s) => ({
+            code: s.underlying_symbol || s.symbol,
+            name: s.underlying_symbol_name || s.display_name,
+            pip: s.pip_size,
+        }))
+        .filter((s) => s.code)
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
+    if (!symbols.length) return;
+
+    assetSelect.innerHTML = '';
+    for (const s of symbols) {
+        const option = document.createElement('option');
+        option.value = s.code;
+        option.textContent = s.name || s.code;
+        option.dataset.pipSize = s.pip;
+        assetSelect.appendChild(option);
+    }
+    if (symbols.some((s) => s.code === previous)) assetSelect.value = previous;
+}
+
+async function subscribeToTicks() {
+    if (stopTicks) stopTicks();
+
+    activeSymbol = assetSelect.value;
+    pipSize = Number(assetSelect.selectedOptions[0]?.dataset.pipSize) || 0.01;
+    decimals = Math.max(2, String(pipSize).split('.')[1]?.length || 2);
+    resetSeries();
+
+    await prefillTicks();
+    recomputeScale();
+    rebuild();
+
+    stopTicks = socket.subscribe({ ticks: activeSymbol }, (msg, error) => {
+        if (error) { notify(`Tick stream error: ${error.message}`, 'error'); return; }
+        if (msg?.tick) processIncomingTick(msg.tick);
+    });
+}
+
+/**
+ * Ticks only — no candle history. The 15m panel reads lookMult x 15m of them,
+ * which at a 2s clock is 9,000 ticks at the default, so this pages back until
+ * there is enough to give the slowest timeframe some swings to work with.
+ */
+async function prefillTicks() {
+    let end = 'latest';
+    const want = lookMult * TF.m15 / 2000 * 1.5;   // ticks needed, with headroom
+    const batches = [];
+
+    for (let page = 0; page < 5 && batches.reduce((n, b) => n + b.times.length, 0) < want; page++) {
+        let response;
+        try {
+            response = await socket.send({ ticks_history: activeSymbol, end, count: 5000, style: 'ticks' });
+        } catch { break; }
+        const times = response?.history?.times || [];
+        const prices = response?.history?.prices || [];
+        if (times.length < 2) break;
+        batches.unshift({ times, prices });
+        end = String(Number(times[0]) - 1);
+    }
+
+    for (const b of batches) {
+        for (let i = 0; i < b.times.length; i++) {
+            const spot = Number(b.prices[i]), t = Number(b.times[i]) * 1000;
+            if (!Number.isFinite(spot) || !Number.isFinite(t)) continue;
+            if (TS.length && t <= TS[TS.length - 1]) continue;   // pages can overlap
+            TS.push(t); MID.push(spot);
+        }
+    }
+
+    if (TS.length) {
+        const hours = (TS[TS.length - 1] - TS[0]) / 3600000;
+        notify(`Prefilled ${TS.length.toLocaleString()} ticks (${hours.toFixed(1)}h) — now streaming live.`);
+    } else {
+        notify('No tick history on this gateway — structure will build as ticks arrive.');
+    }
+}
+
+// --- Tick ingestion --------------------------------------------------------
+
+function processIncomingTick(tick) {
+    const timeMs = Number(tick.epoch) * 1000;
+    const spot = Number(tick.quote);
+    if (!Number.isFinite(timeMs) || !Number.isFinite(spot)) return;
+    if (TS.length && timeMs < TS[TS.length - 1]) return;   // a straggler
+
+    TS.push(timeMs); MID.push(spot);
+    if (TS.length > MAX_TICKS) {
+        const drop = TS.length - MAX_TICKS;
+        TS.splice(0, drop); MID.splice(0, drop);
+    }
+
+    recomputeScale();
+    rebuild();
+
+    stats.spot.textContent = fmtP(spot);
+    stats.ticks.textContent = TS.length.toLocaleString();
+    dirty = true;
+}
+
+function resetSeries() {
+    TS.length = 0; MID.length = 0;
+    S15 = S5 = S1 = null;
+    wasAligned = false;
+    lastSignalAt = 0;
+    lastSignalDir = null;
+    signalCount = 0;
+    stats.ticks.textContent = '0';
+    stats.signals.textContent = '0';
+    dirty = true;
+}
+
+/**
+ * Three numbers describe the feed's scale:
+ *   unit    — median |move|, the natural "u" for readouts
+ *   tickSd  — sd of moves, which is what the swing filter has to ride on
+ *   tickGap — median spacing, so a timeframe can be converted into a tick count
+ */
+function recomputeScale() {
+    const n = MID.length;
+    if (n < 20) return;
+    const from = Math.max(1, n - 1000);
+
+    const moves = [], gaps = [];
+    let sum = 0, sumSq = 0, count = 0;
+    for (let i = from; i < n; i++) {
+        const d = MID[i] - MID[i - 1];
+        sum += d; sumSq += d * d; count++;
+        if (d !== 0) moves.push(Math.abs(d));
+        gaps.push(TS[i] - TS[i - 1]);
+    }
+    if (moves.length) {
+        moves.sort((a, b) => a - b);
+        unit = moves[Math.floor(moves.length / 2)];
+    }
+    if (count > 1) {
+        const mean = sum / count;
+        tickSd = Math.sqrt(Math.max(0, sumSq / count - mean * mean));
+    }
+    if (gaps.length) {
+        gaps.sort((a, b) => a - b);
+        tickGapMs = Math.max(100, gaps[Math.floor(gaps.length / 2)] || 2000);
+    }
+    if (!(unit > 0)) unit = pipSize;
+    if (!(tickSd > 0)) tickSd = unit;
+
+    unitNote.textContent = `${fmtP(unit)} (median tick move) · σ ${fmtP(tickSd)} · ${(tickGapMs / 1000).toFixed(1)}s per tick`;
+}
+
+// --- Windows ---------------------------------------------------------------
+
+/** First tick index at or after `t`. */
+function indexAtTime(t) {
+    let lo = 0, hi = TS.length - 1, best = TS.length - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (TS[mid] >= t) { best = mid; hi = mid - 1; } else lo = mid + 1;
+    }
+    return best;
+}
+
+/** The tick index range covering the last `spanMs` of the stream. */
+function windowFor(spanMs) {
+    if (!TS.length) return null;
+    const end = TS.length - 1;
+    const i0 = indexAtTime(TS[end] - spanMs);
+    return [Math.min(i0, end), end];
+}
+
+/** Where the current 15m box started. */
+const boxAnchor = () => (TS.length ? Math.floor(TS[TS.length - 1] / BOX) * BOX : Math.floor(Date.now() / BOX) * BOX);
+
+/**
+ * Swing filter for a timeframe. Over n ticks a driftless series drifts about
+ * σ√n, so scaling the threshold that way keeps one slider meaningful on 1m and
+ * 15m at once — which a fixed price threshold could never do.
+ */
+function thresholdFor(tfMs) {
+    const nTicks = Math.max(2, tfMs / tickGapMs);
+    return kFilter * tickSd * Math.sqrt(nTicks);
+}
+
+/**
+ * Two swing scales over the SAME ticks.
+ *
+ *   major    — the wide filter. The big highs and lows that set the trend.
+ *   internal — the same reading at a fraction of that threshold. The smaller
+ *              moves that happen inside the current major leg.
+ *
+ * Read together they answer a question neither can alone. Major says which way
+ * the market is going; internal says whether the current move is *with* that
+ * trend or a pullback against it — and, crucially, when the pullback has ended.
+ * An internal CHoCH back in the major direction is that moment.
+ */
+function buildTF(tfMs, name) {
+    const w = windowFor(tfMs * lookMult);
+    if (!w) return null;
+
+    const thMajor = thresholdFor(tfMs);
+    const major = readStructure(w[0], w[1], thMajor, name, tfMs);
+    const internal = readStructure(w[0], w[1], thMajor / internalDiv, name, tfMs);
+
+    // Where internal sits relative to major.
+    let state = 'FLAT';
+    let resumed = false;
+    if (major.bias !== 'RANGE') {
+        const want = major.bias === 'BULL' ? 'up' : 'dn';
+        // A pullback ends when internal structure breaks back the major way —
+        // but only if internal is now actually pointing that way. A stale CHoCH
+        // that price has since reversed is not a resumption, it is a pullback.
+        resumed = Boolean(internal.bias === major.bias
+            && internal.lastEvent
+            && internal.lastEvent.dir === want
+            && internal.lastEvent.kind === 'CHoCH'
+            && internal.eventAge <= freshTicks);
+        if (internal.bias === 'RANGE') state = 'FLAT';
+        else if (resumed) state = 'RESUMING';
+        else state = internal.bias === major.bias ? 'IN TREND' : 'PULLBACK';
+    }
+
+    return { name, tfMs, i0: w[0], i1: w[1], thMajor, major, internal, state, resumed };
+}
+
+function rebuild() {
+    S15 = buildTF(TF.m15, '15m');
+    S5 = buildTF(TF.m5, '5m');
+    S1 = buildTF(TF.m1, '1m');
+    evaluateAlignment();
+    dirty = true;
+}
+
+// --- Structure, straight off the tick path ---------------------------------
+
+/**
+ * ZigZag over the raw quotes. A swing only turns once price has retraced `th`
+ * from the running extreme, which is what stops every tick becoming a pivot.
+ * The extreme still in progress comes back separately as `running`: it is
+ * drawn, because you want to see the live leg, but it is kept out of the
+ * structural read, because an unconfirmed swing is not a swing yet.
+ */
+function zigzag(i0, i1, th) {
+    const piv = [];
+    if (i1 - i0 < 2 || !(th > 0)) return { piv, running: null };
+
+    let hi = MID[i0], hiI = i0, lo = MID[i0], loI = i0;
+    let dir = null, ep = 0, ei = 0;
+
+    for (let i = i0 + 1; i <= i1; i++) {
+        const p = MID[i];
+
+        if (dir === null) {
+            // Seeding: wait until the path has spanned `th`, then the earlier of
+            // the two extremes becomes the first pivot.
+            if (p > hi) { hi = p; hiI = i; }
+            if (p < lo) { lo = p; loI = i; }
+            if (hi - lo >= th) {
+                if (hiI < loI) { piv.push({ i: hiI, p: hi, type: 'H' }); dir = 'dn'; ep = lo; ei = loI; }
+                else { piv.push({ i: loI, p: lo, type: 'L' }); dir = 'up'; ep = hi; ei = hiI; }
+            }
+            continue;
+        }
+
+        if (dir === 'up') {
+            if (p > ep) { ep = p; ei = i; }
+            else if (ep - p >= th) { piv.push({ i: ei, p: ep, type: 'H' }); dir = 'dn'; ep = p; ei = i; }
+        } else {
+            if (p < ep) { ep = p; ei = i; }
+            else if (p - ep >= th) { piv.push({ i: ei, p: ep, type: 'L' }); dir = 'up'; ep = p; ei = i; }
+        }
+    }
+
+    const running = dir ? { i: ei, p: ep, type: dir === 'up' ? 'H' : 'L', live: true } : null;
+    return { piv, running };
+}
+
+/**
+ * Turn a stretch of ticks into a structural read: labelled swings, a trend, and
+ * the BOS / CHoCH events that produced it.
+ *
+ *   BOS   — the trend takes out its own last swing in the same direction.
+ *           Continuation.
+ *   CHoCH — the first break the OTHER way. The trend changing hands, and the
+ *           only event that flips the bias.
+ */
+function readStructure(i0, i1, th, name, tfMs) {
+    const empty = {
+        name, i0, i1, th, tfMs, piv: [], running: null, events: [], lastEvent: null,
+        live: null, trend: null, refH: null, refL: null, lastH: null, lastL: null,
+        bias: 'RANGE', biasSource: 'not enough ticks', eventAge: Infinity,
+    };
+    if (i1 - i0 < MIN_STRUCT_TICKS) return empty;
+
+    const { piv, running } = zigzag(i0, i1, th);
+
+    // Label each swing against the previous swing of the same kind.
+    let prevH = null, prevL = null;
+    for (const p of piv) {
+        if (p.type === 'H') { p.label = prevH === null ? 'H' : (p.p > prevH ? 'HH' : 'LH'); prevH = p.p; }
+        else { p.label = prevL === null ? 'L' : (p.p > prevL ? 'HL' : 'LL'); prevL = p.p; }
+    }
+
+    // Walk the swings and record where structure actually broke.
+    let trend = null, refH = null, refL = null;
+    const events = [];
+    for (const p of piv) {
+        if (p.type === 'H') {
+            if (refH !== null && p.p > refH) {
+                events.push({ i: p.i, dir: 'up', kind: trend === 'dn' ? 'CHoCH' : 'BOS', level: refH });
+                trend = 'up';
+            }
+            refH = p.p;
+        } else {
+            if (refL !== null && p.p < refL) {
+                events.push({ i: p.i, dir: 'dn', kind: trend === 'up' ? 'CHoCH' : 'BOS', level: refL });
+                trend = 'dn';
+            }
+            refL = p.p;
+        }
+    }
+
+    // A break price is making right now, before a swing has confirmed it.
+    const spot = MID[i1];
+    let live = null;
+    if (refH !== null && spot > refH) live = { dir: 'up', kind: trend === 'dn' ? 'CHoCH' : 'BOS', level: refH };
+    else if (refL !== null && spot < refL) live = { dir: 'dn', kind: trend === 'up' ? 'CHoCH' : 'BOS', level: refL };
+
+    // Bias, most-current fact first. A live break outranks the confirmed trend:
+    // once price has moved beyond the last confirmed swing, structure has broken
+    // already, and waiting for the zigzag to turn means sitting through the move.
+    // With no swings at all, a one-way impulse is still a direction.
+    const effective = live ? live.dir : trend;
+    let bias, biasSource;
+    if (effective) {
+        bias = effective === 'up' ? 'BULL' : 'BEAR';
+        biasSource = live && (!trend || live.dir !== trend) ? `live ${live.kind}` : 'structure';
+    } else if (running) {
+        bias = running.type === 'H' ? 'BULL' : 'BEAR';
+        biasSource = 'impulse — no trend yet';
+    } else {
+        bias = 'RANGE';
+        biasSource = 'no structure';
+    }
+
+    const lastEvent = events[events.length - 1] || null;
+    const lastH = [...piv].reverse().find((p) => p.type === 'H') || null;
+    const lastL = [...piv].reverse().find((p) => p.type === 'L') || null;
+
+    return {
+        name, i0, i1, th, tfMs, piv, running, events, lastEvent, live,
+        trend, refH, refL, lastH, lastL, bias, biasSource,
+        // How many TICKS back the newest structural event sits — the 1m trigger
+        // is only worth anything while it is still recent.
+        eventAge: lastEvent ? i1 - lastEvent.i : Infinity,
+    };
+}
+
+// --- Alignment -------------------------------------------------------------
+
+function evaluateAlignment() {
+    if (!S15 || !S5 || !S1) return;
+
+    // Direction and confirmation come from MAJOR structure — the slow read is
+    // the one that should set a bias. The trigger comes from INTERNAL structure
+    // on the 1m, because that is the scale a pullback actually turns on.
+    const dir = S15.major.bias;
+    const agree5 = dir !== 'RANGE' && S5.major.bias === dir;
+    const agree1 = dir !== 'RANGE' && S1.internal.bias === dir;
+    const score = dir === 'RANGE' ? 0 : 1 + (agree5 ? 1 : 0) + (agree1 ? 1 : 0);
+
+    const want = dir === 'BULL' ? 'up' : 'dn';
+    const ev = S1.internal.lastEvent;
+    const fromEvent = ev && ev.dir === want && S1.internal.eventAge <= freshTicks
+        ? `1m internal ${ev.kind} ${S1.internal.eventAge} ticks ago`
+        : null;
+    const live = S1.internal.live;
+    const fromLive = live && live.dir === want ? `1m internal ${live.kind} forming` : null;
+    const trigger = agree5 && agree1 ? (fromEvent || fromLive) : null;
+
+    // The textbook setup: higher timeframes trending, and the pullback on the
+    // lower one has just broken back their way.
+    const premium = score === 3 && Boolean(trigger)
+        && (S5.state === 'RESUMING' || S1.state === 'RESUMING');
+
+    align = { dir, score, aligned: score === 3, trigger, premium };
+
+    // Log on the edge into alignment, or on a genuine flip to the other side —
+    // alignment can stay true straight through a reversal, and a bare "was it
+    // aligned last tick" would swallow that.
+    const nowAligned = align.aligned && Boolean(trigger);
+    const flipped = nowAligned && dir !== lastSignalDir;
+    const cooledDown = Date.now() - lastSignalAt >= SIGNAL_COOLDOWN_MS;
+    if (nowAligned && cooledDown && (flipped || !wasAligned)) markSignal();
+    wasAligned = nowAligned;
+}
+
+function markSignal() {
+    lastSignalAt = Date.now();
+    lastSignalDir = align.dir;
+    signalCount++;
+    stats.signals.textContent = signalCount;
+    freshUntil = Date.now() + 2000;
+    beep(align.dir);
+}
+
+let audioCtx = null;
+function beep(dir) {
+    if (!soundOn) return;
+    try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = dir === 'BULL' ? 880 : 440;
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        const t = audioCtx.currentTime;
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.14, t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+        osc.start(t); osc.stop(t + 0.36);
+    } catch { /* autoplay policy — the visual alert stands alone */ }
+}
+
+// --- Canvas plumbing -------------------------------------------------------
+
+function sizeCanvas(canvas, context, cssHeight) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(50, canvas.clientWidth || 300);
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function sizeAll() {
+    sizeCanvas(boxCv, boxCx, 360);
+    sizeCanvas(tf15Cv, tf15Cx, 200);
+    sizeCanvas(tf5Cv, tf5Cx, 200);
+    sizeCanvas(tf1Cv, tf1Cx, 200);
+    dirty = true;
+}
+window.addEventListener('resize', sizeAll);
+
+function priceGrid(cx, left, right, m, H, lo, hi) {
+    cx.strokeStyle = COL.grid; cx.lineWidth = 1;
+    cx.fillStyle = COL.axis; cx.font = '10px ui-monospace, monospace';
+    for (let k = 0; k <= 4; k++) {
+        const price = lo + ((hi - lo) * k) / 4;
+        const y = m.t + (1 - (price - lo) / (hi - lo)) * (H - m.t - m.b);
+        cx.beginPath(); cx.moveTo(left, y); cx.lineTo(right, y); cx.stroke();
+        cx.fillText(fmtP(price), right + 5, y + 3);
+    }
+}
+
+function emptyMessage(cx, W, H, text) {
+    cx.fillStyle = COL.axis; cx.font = '13px sans-serif';
+    cx.fillText(text, 20, H / 2);
+}
+
+function extent(i0, i1) {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = i0; i <= i1; i++) { if (MID[i] < lo) lo = MID[i]; if (MID[i] > hi) hi = MID[i]; }
+    return [lo, hi];
+}
+
+/**
+ * Draw the tick path. When there are more ticks than pixels, each column is
+ * drawn as its own min-to-max bar so a spike never gets skipped over — striding
+ * would quietly delete the very extremes the structure is built from.
+ */
+function tickPath(cx, i0, i1, X, Y, plotW) {
+    const n = i1 - i0 + 1;
+    cx.beginPath();
+    if (n <= plotW * 2) {
+        for (let i = i0; i <= i1; i++) {
+            const x = X(i), y = Y(MID[i]);
+            if (i === i0) cx.moveTo(x, y); else cx.lineTo(x, y);
+        }
+    } else {
+        const per = n / plotW;
+        let started = false;
+        for (let c = 0; c < plotW; c++) {
+            const a = i0 + Math.floor(c * per);
+            const b = Math.min(i1, i0 + Math.floor((c + 1) * per) - 1);
+            if (b < a) continue;
+            let mn = MID[a], mx = MID[a];
+            for (let i = a; i <= b; i++) { if (MID[i] < mn) mn = MID[i]; if (MID[i] > mx) mx = MID[i]; }
+            const x = X(a);
+            if (!started) { cx.moveTo(x, Y(mn)); started = true; }
+            cx.lineTo(x, Y(mn));
+            cx.lineTo(x, Y(mx));
+        }
+    }
+    cx.stroke();
+}
+
+// --- 1. The current 15m box, tick by tick ---------------------------------
+
+function drawBox() {
+    const W = boxCv.clientWidth, H = 360, m = { l: 8, r: 70, t: 26, b: 24 };
+    boxCx.clearRect(0, 0, W, H);
+    if (TS.length < 2) { emptyMessage(boxCx, W, H, 'Awaiting incoming WebSocket stream data…'); return; }
+
+    const anchor = boxAnchor();
+    const i0 = indexAtTime(anchor);
+    const i1 = TS.length - 1;
+    if (i1 <= i0) { emptyMessage(boxCx, W, H, 'A new 15m box just opened — waiting for ticks…'); return; }
+
+    let [lo, hi] = extent(i0, i1);
+    const pad = (hi - lo) * 0.12 || unit * 6;
+    lo -= pad; hi += pad;
+
+    const plotW = W - m.l - m.r, plotH = H - m.t - m.b;
+    // Mapped by TIME across the whole 15m, so the path advances left to right as
+    // the box fills instead of rescaling on every tick.
+    const X = (i) => m.l + Math.min(1, (TS[i] - anchor) / BOX) * plotW;
+    const Y = (p) => m.t + (1 - (p - lo) / (hi - lo)) * plotH;
+
+    priceGrid(boxCx, m.l, W - m.r, m, H, lo, hi);
+
+    // 1m marks (dotted) and 5m marks (solid) across the box
+    for (let k = 1; k < 15; k++) {
+        const x = m.l + (k / 15) * plotW;
+        const isFive = k % 5 === 0;
+        boxCx.strokeStyle = isFive ? 'rgba(88,166,255,.35)' : 'rgba(125,133,144,.18)';
+        boxCx.lineWidth = 1;
+        boxCx.setLineDash(isFive ? [] : [2, 4]);
+        boxCx.beginPath(); boxCx.moveTo(x, m.t); boxCx.lineTo(x, m.t + plotH); boxCx.stroke();
+        boxCx.setLineDash([]);
+        if (isFive) {
+            boxCx.fillStyle = 'rgba(88,166,255,.55)';
+            boxCx.font = '9px ui-monospace, monospace';
+            boxCx.fillText(`${k}m`, x + 3, m.t + plotH + 12);
+        }
+    }
+
+    // The last 5m and the last 1m, shaded — the nesting, without a candle in sight
+    const shade = (spanMs, fill) => {
+        const from = Math.max(anchor, TS[i1] - spanMs);
+        const x0 = m.l + Math.min(1, (from - anchor) / BOX) * plotW;
+        const x1 = m.l + Math.min(1, (TS[i1] - anchor) / BOX) * plotW;
+        boxCx.fillStyle = fill;
+        boxCx.fillRect(x0, m.t, Math.max(1, x1 - x0), plotH);
+    };
+    shade(TF.m5, 'rgba(88,166,255,.06)');
+    shade(TF.m1, 'rgba(212,160,23,.09)');
+
+    // Box open / running high / running low
+    const open = MID[i0];
+    const guide = (price, color, text, dash) => {
+        const y = Y(price);
+        boxCx.setLineDash(dash); boxCx.strokeStyle = color; boxCx.lineWidth = 1;
+        boxCx.beginPath(); boxCx.moveTo(m.l, y); boxCx.lineTo(W - m.r, y); boxCx.stroke();
+        boxCx.setLineDash([]);
+        boxCx.fillStyle = color; boxCx.font = '9px ui-monospace, monospace';
+        boxCx.fillText(text, W - m.r + 5, y + 3);
+    };
+    guide(open, COL.dash, 'O', [4, 4]);
+    const [rawLo, rawHi] = extent(i0, i1);
+    guide(rawHi, 'rgba(63,185,80,.7)', 'H', [5, 4]);
+    guide(rawLo, 'rgba(248,81,73,.7)', 'L', [5, 4]);
+
+    // The tick path, coloured by where it sits against the box open
+    const bull = MID[i1] >= open;
+    boxCx.strokeStyle = bull ? 'rgba(63,185,80,.9)' : 'rgba(248,81,73,.9)';
+    boxCx.lineWidth = 1.3;
+    tickPath(boxCx, i0, i1, X, Y, plotW);
+
+    // Head of the stream
+    boxCx.fillStyle = bull ? COL.up : COL.dn;
+    boxCx.beginPath(); boxCx.arc(X(i1), Y(MID[i1]), 4, 0, Math.PI * 2); boxCx.fill();
+
+    // Spot tag
+    const ySpot = Y(MID[i1]);
+    boxCx.fillStyle = COL.ac; boxCx.fillRect(W - m.r, ySpot - 8, m.r, 16);
+    boxCx.fillStyle = '#06121f'; boxCx.font = 'bold 9px ui-monospace, monospace';
+    boxCx.fillText(fmtP(MID[i1]), W - m.r + 4, ySpot + 3);
+
+    boxCx.fillStyle = COL.axis; boxCx.font = '10px ui-monospace, monospace';
+    boxCx.fillText(
+        `${activeSymbol || '—'} · box opened ${fmtClock(anchor)} · ${(i1 - i0 + 1).toLocaleString()} ticks in · ` +
+        `gold = last 1m, blue = last 5m`, m.l + 2, 15);
+}
+
+// --- 2. One timeframe with its structure ----------------------------------
+
+function drawTF(cv, cx, T, label, role) {
+    const W = cv.clientWidth, H = 200, m = { l: 6, r: 70, t: 22, b: 16 };
+    cx.clearRect(0, 0, W, H);
+
+    if (!T || T.i1 - T.i0 < 4) {
+        emptyMessage(cx, W, H, `${label} — not enough ticks yet…`);
+        return;
+    }
+
+    const { i0, i1 } = T;
+    const S = T.major;
+    let [lo, hi] = extent(i0, i1);
+    for (const level of [S.refH, S.refL]) {
+        if (level === null) continue;
+        if (level < lo) lo = level;
+        if (level > hi) hi = level;
+    }
+    const pad = (hi - lo) * 0.10 || unit * 6;
+    lo -= pad; hi += pad;
+
+    const plotW = W - m.l - m.r, plotH = H - m.t - m.b;
+    const span = Math.max(1, i1 - i0);
+    const X = (i) => m.l + ((i - i0) / span) * plotW;
+    const Y = (p) => m.t + (1 - (p - lo) / (hi - lo)) * plotH;
+
+    // The current 15m box, shaded on every panel so the same stretch of ticks
+    // is identifiable across all three at a glance.
+    const anchor = boxAnchor();
+    if (TS[i1] >= anchor) {
+        const bi = Math.max(i0, indexAtTime(anchor));
+        const bx = X(bi);
+        cx.fillStyle = 'rgba(88,166,255,.07)';
+        cx.fillRect(bx, m.t, W - m.r - bx, plotH);
+        cx.setLineDash([3, 3]); cx.strokeStyle = 'rgba(88,166,255,.35)'; cx.lineWidth = 1;
+        cx.beginPath(); cx.moveTo(bx, m.t); cx.lineTo(bx, m.t + plotH); cx.stroke();
+        cx.setLineDash([]);
+    }
+
+    priceGrid(cx, m.l, W - m.r, m, H, lo, hi);
+
+    // The tick path
+    cx.strokeStyle = COL.path; cx.lineWidth = 1;
+    tickPath(cx, i0, i1, X, Y, plotW);
+
+    // The live swing levels — the prices that produce the next BOS or CHoCH.
+    const level = (price, color, text) => {
+        if (price === null) return;
+        const y = Y(price);
+        cx.setLineDash([6, 4]); cx.strokeStyle = color; cx.lineWidth = 1;
+        cx.beginPath(); cx.moveTo(m.l, y); cx.lineTo(W - m.r, y); cx.stroke();
+        cx.setLineDash([]);
+        cx.fillStyle = color; cx.font = '9px ui-monospace, monospace';
+        cx.fillText(text, W - m.r + 5, y + 3);
+    };
+    level(S.refH, 'rgba(63,185,80,.65)', '↑brk');
+    level(S.refL, 'rgba(248,81,73,.65)', '↓brk');
+
+    /** One zigzag. `weight` controls whether it reads as foreground or context. */
+    const drawSwings = (St, color, weight) => {
+        const drawn = [...St.piv];
+        if (St.running) drawn.push(St.running);
+        if (drawn.length > 1) {
+            cx.strokeStyle = color;
+            cx.lineWidth = weight.line;
+            cx.globalAlpha = weight.alpha;
+            if (weight.dash) cx.setLineDash(weight.dash);
+            cx.beginPath();
+            drawn.forEach((p, j) => {
+                const x = X(p.i), y = Y(p.p);
+                if (j) cx.lineTo(x, y); else cx.moveTo(x, y);
+            });
+            cx.stroke();
+            cx.setLineDash([]);
+            cx.globalAlpha = 1;
+        }
+
+        cx.textAlign = 'center';
+        for (const p of drawn) {
+            const x = X(p.i), y = Y(p.p), isHigh = p.type === 'H';
+            cx.globalAlpha = (p.live ? 0.45 : 1) * weight.alpha;
+            cx.fillStyle = isHigh ? COL.up : COL.dn;
+            cx.beginPath(); cx.arc(x, y, weight.dot, 0, Math.PI * 2); cx.fill();
+            if (p.label && weight.labels) {
+                cx.font = `${weight.bold ? 'bold ' : ''}${weight.font}px ui-monospace, monospace`;
+                cx.fillStyle = p.label[0] === 'H' ? COL.up : COL.dn;
+                cx.fillText(p.label, x, isHigh ? y - weight.dot - 4 : y + weight.dot + 10);
+            }
+            cx.globalAlpha = 1;
+        }
+        cx.textAlign = 'left';
+    };
+
+    /** BOS / CHoCH markers, drawn at the level that got broken. */
+    const drawEvents = (St, alpha, font, reach) => {
+        cx.textAlign = 'center';
+        for (const ev of St.events) {
+            const x = X(ev.i), y = Y(ev.level);
+            const col = ev.kind === 'CHoCH' ? COL.gold : COL.ac;
+            cx.globalAlpha = alpha;
+            cx.strokeStyle = col; cx.lineWidth = 1;
+            cx.setLineDash([2, 2]);
+            cx.beginPath(); cx.moveTo(x - reach, y); cx.lineTo(x + reach * 0.4, y); cx.stroke();
+            cx.setLineDash([]);
+            cx.fillStyle = col; cx.font = `bold ${font}px ui-monospace, monospace`;
+            cx.fillText(ev.kind, x, ev.dir === 'up' ? y - 4 : y + font + 3);
+            cx.globalAlpha = 1;
+        }
+        cx.textAlign = 'left';
+    };
+
+    // Internal first, so the major structure sits on top of it rather than
+    // competing with it. Purple keeps the two scales apart at a glance.
+    drawSwings(T.internal, COL.inner, { line: 1, alpha: 0.5, dot: 2, font: 7, labels: true, bold: false, dash: [3, 3] });
+    drawEvents(T.internal, 0.4, 7, 14);
+    drawSwings(S, '#388bfd', { line: 1.8, alpha: 1, dot: 3.5, font: 9, labels: true, bold: true, dash: null });
+    drawEvents(S, 1, 8, 26);
+
+    // Head of the stream
+    cx.fillStyle = COL.ac;
+    cx.beginPath(); cx.arc(X(i1), Y(MID[i1]), 3.5, 0, Math.PI * 2); cx.fill();
+
+    // Header: major bias, then how internal sits against it
+    const biasCol = S.bias === 'BULL' ? COL.up : S.bias === 'BEAR' ? COL.dn : COL.axis;
+    cx.fillStyle = COL.axis; cx.font = 'bold 10px ui-monospace, monospace';
+    cx.fillText(label, m.l + 2, 13);
+    cx.fillStyle = COL.dash; cx.font = '9px ui-monospace, monospace';
+    cx.fillText(role, m.l + 34, 13);
+    const roleW = cx.measureText(role).width;
+    let x = m.l + 42 + roleW;
+    cx.fillStyle = biasCol; cx.font = 'bold 10px ui-monospace, monospace';
+    cx.fillText(S.bias, x, 13);
+    x += cx.measureText(S.bias).width + 8;
+    cx.fillStyle = STATE_COL[T.state] || COL.dash;
+    cx.font = 'bold 9px ui-monospace, monospace';
+    cx.fillText(T.state, x, 13);
+    x += cx.measureText(T.state).width + 10;
+    cx.fillStyle = COL.dash; cx.font = '9px ui-monospace, monospace';
+    cx.fillText(
+        `${(i1 - i0 + 1).toLocaleString()} ticks (${(lookMult * T.tfMs / 60000).toFixed(0)}m) · ` +
+        `major ${(S.th / unit).toFixed(1)}u / ${S.piv.length} swings · ` +
+        `internal ${(T.internal.th / unit).toFixed(1)}u / ${T.internal.piv.length}`,
+        x, 13);
+}
+
+// --- HUD -------------------------------------------------------------------
+
+const BIAS_CLASS = { BULL: 'bull', BEAR: 'bear', RANGE: 'range' };
+
+const STATE_NOTE = {
+    'IN TREND': 'internal agrees — running with the trend',
+    PULLBACK: 'internal against major — pulling back',
+    RESUMING: 'pullback just broke back — trend resuming',
+    FLAT: 'internal has no direction',
+};
+
+function paintBadge(badge, T) {
+    if (!T) return;
+    const S = T.major;
+    const cls = BIAS_CLASS[S.bias];
+    badge.box.className = `tfbadge ${cls}`;
+    badge.bias.className = `tfbias ${cls}`;
+    badge.bias.textContent = S.bias === 'BULL' ? '▲ BULL' : S.bias === 'BEAR' ? '▼ BEAR' : '— RANGE';
+
+    const h = S.lastH?.label, l = S.lastL?.label;
+    const swings = h || l ? `${h || '—'} · ${l || '—'}` : 'no swings yet';
+    badge.sw.textContent = `major ${swings}  (${S.biasSource})`;
+
+    // Internal structure and how it sits against major.
+    const iCls = BIAS_CLASS[T.internal.bias];
+    const stateCls = T.state.toLowerCase().replace(' ', '-');
+    badge.st.innerHTML =
+        `<span class="chip ${stateCls}">${T.state}</span>` +
+        `<span class="inner ${iCls}">internal ${T.internal.bias}</span>` +
+        `<span class="note">${STATE_NOTE[T.state] || ''}</span>`;
+
+    // Show whichever break is the more current: a live one beats a past one.
+    const ev = S.lastEvent, live = S.live;
+    const iev = T.internal.lastEvent;
+    if (live) {
+        badge.ev.innerHTML = `major <span class="${live.kind === 'CHoCH' ? 'choch' : 'bos'}">${live.kind} ` +
+            `${live.dir === 'up' ? '↑' : '↓'}</span> forming @ ${fmtP(live.level)}`;
+    } else if (ev) {
+        badge.ev.innerHTML = `major <span class="${ev.kind === 'CHoCH' ? 'choch' : 'bos'}">${ev.kind} ` +
+            `${ev.dir === 'up' ? '↑' : '↓'}</span> ${S.eventAge}t ago` +
+            (iev ? ` · internal <span class="${iev.kind === 'CHoCH' ? 'choch' : 'bos'}">${iev.kind} ` +
+                `${iev.dir === 'up' ? '↑' : '↓'}</span> ${T.internal.eventAge}t` : '');
+    } else {
+        badge.ev.textContent = 'no break yet';
+    }
+}
+
+function drawHud() {
+    paintBadge(badges.m15, S15);
+    paintBadge(badges.m5, S5);
+    paintBadge(badges.m1, S1);
+
+    const stillFresh = Date.now() < freshUntil;
+    alignPanel.className = `align ${align.aligned ? BIAS_CLASS[align.dir] : ''}${stillFresh ? ' fresh' : ''}`;
+
+    if (!S15) {
+        alignVerdict.textContent = 'Waiting for data…';
+        alignVerdict.className = 'align-verdict wait';
+    } else if (align.aligned && align.trigger) {
+        const arrow = align.dir === 'BULL' ? '▲' : '▼';
+        alignVerdict.textContent = align.premium
+            ? `${arrow} ALIGNED ${align.dir} — pullback ended, trend resuming`
+            : `${arrow} ALIGNED ${align.dir} — 15m/5m major agree, 1m internal confirms`;
+        alignVerdict.className = `align-verdict ${BIAS_CLASS[align.dir]}`;
+    } else if (align.aligned) {
+        alignVerdict.textContent = `${align.dir === 'BULL' ? '▲' : '▼'} All three agree — waiting for a fresh 1m internal break`;
+        alignVerdict.className = `align-verdict ${BIAS_CLASS[align.dir]}`;
+    } else if (align.score === 2) {
+        alignVerdict.textContent = `${align.dir === 'BULL' ? '▲' : '▼'} 2 of 3 — one timeframe still disagrees`;
+        alignVerdict.className = 'align-verdict wait';
+    } else {
+        alignVerdict.textContent = align.dir === 'RANGE' ? 'No 15m bias — stand aside' : 'Not aligned — stand aside';
+        alignVerdict.className = 'align-verdict wait';
+    }
+
+    alignMeta.textContent = S15
+        ? `${activeSymbol || '—'} · alignment ${align.score}/3 · ` +
+          `15m ${S15.state} · 5m ${S5?.state ?? '—'} · 1m ${S1?.state ?? '—'}` +
+          `${align.trigger ? ` · trigger: ${align.trigger}` : ''}`
+        : '—';
+
+    if (TS.length < 2) return;
+
+    const anchor = boxAnchor();
+    const i0 = indexAtTime(anchor), i1 = TS.length - 1;
+    if (i1 > i0) {
+        const [lo, hi] = extent(i0, i1);
+        stats.open.textContent = fmtP(MID[i0]);
+        stats.high.textContent = fmtP(hi);
+        stats.low.textContent = fmtP(lo);
+        stats.range.textContent = ((hi - lo) / unit).toFixed(1);
+        stats.inbox.textContent = `${(i1 - i0 + 1).toLocaleString()}`;
+    }
+    stats.gap.textContent = `${(tickGapMs / 1000).toFixed(1)}s`;
+
+    const msLeft = anchor + BOX - Date.now();
+    if (msLeft <= 0) {
+        stats.left.textContent = 'closing…';
+    } else {
+        const s = Math.floor(msLeft / 1000);
+        stats.left.textContent = `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+    }
+}
+
+// --- Render loop -----------------------------------------------------------
+
+let dirty = true;
+let lastFrame = 0;
+
+function frame(now) {
+    requestAnimationFrame(frame);
+    if (frozen) return;
+    // The countdown needs a beat of its own, so redraw at least 4x a second.
+    if (!dirty && now - lastFrame < 250) return;
+    lastFrame = now;
+    dirty = false;
+
+    drawBox();
+    drawTF(tf15Cv, tf15Cx, S15, '15m', 'bias');
+    drawTF(tf5Cv, tf5Cx, S5, '5m', 'confirmation');
+    drawTF(tf1Cv, tf1Cx, S1, '1m', 'trigger');
+    drawHud();
+}
+
+// --- Controls --------------------------------------------------------------
+
+assetSelect.addEventListener('change', () => { if (socket?.isOpen) subscribeToTicks(); });
+
+clearBtn.addEventListener('click', resetSeries);
+
+lookSlider.addEventListener('input', (e) => {
+    lookMult = parseInt(e.target.value, 10);
+    lookVal.textContent = `${lookMult} ×`;
+    rebuild();
+});
+
+kSlider.addEventListener('input', (e) => {
+    kFilter = parseFloat(e.target.value);
+    kVal.textContent = `${kFilter.toFixed(2)} × σ√n`;
+    rebuild();
+});
+
+innerSlider.addEventListener('input', (e) => {
+    internalDiv = parseFloat(e.target.value);
+    innerVal.textContent = `major ÷ ${internalDiv.toFixed(1)}`;
+    rebuild();
+});
+
+freshSlider.addEventListener('input', (e) => {
+    freshTicks = parseInt(e.target.value, 10);
+    freshVal.textContent = `${freshTicks} ticks`;
+    evaluateAlignment();
+    dirty = true;
+});
+
+soundChk.addEventListener('change', (e) => { soundOn = e.target.checked; });
+
+freezeBtn.addEventListener('click', () => {
+    frozen = !frozen;
+    freezeBtn.textContent = frozen ? '▶ Resume view' : '❚❚ Freeze view';
+    freezeBtn.className = frozen ? 'on' : 'sec';
+    dirty = true;
+});
+
+/** Dump the streamed ticks in the shape the offline replay tools expect. */
+exportBtn.addEventListener('click', () => {
+    if (!TS.length) { notify('Nothing streamed yet.', 'error'); return; }
+    const p = (n) => String(n).padStart(2, '0');
+    const rows = ['<DATE>\t<TIME>\t<BID>\t<ASK>'];
+    for (let i = 0; i < TS.length; i++) {
+        const d = new Date(TS[i]);
+        const date = `${d.getUTCFullYear()}.${p(d.getUTCMonth() + 1)}.${p(d.getUTCDate())}`;
+        const time = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}.000`;
+        rows.push(`${date}\t${time}\t${MID[i]}\t${MID[i]}`);
+    }
+    const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeSymbol || 'ticks'}_${TS.length}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+});
+
+sizeAll();
+requestAnimationFrame(frame);
+connect(); // market data is public — start streaming without waiting for a click

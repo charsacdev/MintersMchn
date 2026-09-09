@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Charsac Hedges — Higher/Lower Bot</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <h1>Higher / Lower <span class="tag">HIGHER · LOWER</span></h1>
+        <div class="sub">
+            Settles against a <strong>barrier you choose</strong>. 5–10 ticks or 15s–24h.
+            The barrier is a probability dial — push it away for a bigger payout, pull it
+            behind spot to win more often for less. The tick-cycle bot below buys both
+            sides at once and re-enters every tick.
+            <a href="../RiseFall/">Rise/Fall →</a>
+            <a href="../TouchNoTouch/">Touch/No Touch →</a>
+        </div>
+    </header>
+
+    <!-- 1. Connection ------------------------------------------------------ -->
+    <section class="card">
+        <h2>Connection</h2>
+        <div class="row">
+            <input type="text" id="appid-input" placeholder="App ID (from /dashboard/create)" style="flex:1;min-width:180px">
+            <input type="password" id="token-input" placeholder="Personal Access Token (trade scope)" style="flex:2;min-width:220px">
+            <select id="account-select">
+                <option value="demo">Demo</option>
+                <option value="real">Real ⚠️</option>
+            </select>
+            <button id="connect-btn">Connect</button>
+            <button class="sec" id="preview-btn">Preview without token</button>
+        </div>
+        <div class="status-row">
+            <span id="connection-status" class="status-badge disconnected">Disconnected</span>
+            <span id="balance-display" class="muted">Balance: <strong>—</strong></span>
+        </div>
+        <div id="notice-bar" class="notice" hidden></div>
+    </section>
+
+    <!-- 2. Contract setup -------------------------------------------------- -->
+    <section class="card">
+        <h2>Contract</h2>
+        <div class="row">
+            <label>Asset
+                <select id="asset-select">
+                    <option value="R_100">Volatility 100 Index</option>
+                </select>
+            </label>
+            <label>Duration
+                <input type="number" id="duration-input" value="10" min="5" max="10" step="1" style="width:74px">
+                <select id="unit-select">
+                    <option value="t" selected>ticks</option>
+                    <option value="s">seconds</option>
+                    <option value="m">minutes</option>
+                </select>
+            </label>
+            <label>Stake
+                <input type="number" id="stake-input" value="10" min="0.35" step="0.01" style="width:88px">
+                <span class="muted" id="currency-label">USD</span>
+            </label>
+            <span class="muted" id="duration-note"></span>
+        </div>
+
+        <div class="row barrier-row" id="barrier-row">
+            <label>Barrier offset
+                <input type="number" id="barrier-input" value="0.06" min="0" step="0.01" style="width:88px">
+            </label>
+            <label>Side
+                <select id="barrier-side">
+                    <option value="auto">Auto — follows direction</option>
+                    <option value="+">Above spot (+)</option>
+                    <option value="-">Below spot (−)</option>
+                </select>
+            </label>
+            <span class="muted" id="barrier-preview">Barrier —</span>
+        </div>
+
+        <div class="quote-row">
+            <span class="muted">Live quote</span>
+            <span id="quote-up" class="quote up">▲ —</span>
+            <span id="quote-dn" class="quote dn">▼ —</span>
+            <span id="edge-badge" class="edge-badge" hidden>—</span>
+            <span class="muted" id="quote-note">Connect to price this contract.</span>
+        </div>
+
+        <div class="row buy-row">
+            <button class="buy up" id="buy-up-btn" disabled>▲ <span id="buy-up-label">HIGHER</span></button>
+            <button class="buy dn" id="buy-dn-btn" disabled>▼ <span id="buy-dn-label">LOWER</span></button>
+            <span class="muted">Manual entry — one contract at a time. No 1–4 tick contract exists.</span>
+        </div>
+    </section>
+
+    <!-- 3. Auto-trade — tick cycle bot -------------------------------------- -->
+    <section class="card hedge">
+        <h2>Auto-trade — tick cycle</h2>
+        <p class="muted lead">
+            Buys <strong>HIGHER</strong> at +offset and <strong>LOWER</strong> at −offset in the
+            same instant — real orders on the connected account. Both ride to expiry; neither is
+            sold or cut. The moment they settle it re-enters on the next tick. No signal, no
+            structure. Cycles are paced by the <strong>Gap</strong> below — raise it to trade
+            less often. Barrier offsets are capped at 2 decimal places by the gateway, so the
+            value actually sent is shown beside the inputs.
+            <strong>It does not stop on its own</strong> — only Stop ends it.
+        </p>
+
+        <div class="row">
+            <label title="Size each contract as a percentage of the live account balance, recalculated every cycle.">
+                <input type="checkbox" id="tc-percent-mode" checked> % of balance
+            </label>
+            <label title="Percent of the account balance staked on EACH contract, rounded to a whole number.">Stake
+                <input type="number" id="tc-stake-pct" value="1.5" min="0.1" max="100" step="0.1" style="width:74px">
+                <span class="muted">% each</span>
+            </label>
+            <label title="Fixed stake on EACH HIGHER contract. Ignored while % of balance is ticked.">HIGHER stake
+                <input type="number" id="tc-up-stake" value="10" min="0.35" step="0.01" style="width:88px">
+            </label>
+            <label title="How many separate HIGHER contracts. Two $10 contracts price and settle exactly as one $20 contract.">×
+                <input type="number" id="tc-up-count" value="1" min="1" max="10" step="1" style="width:60px">
+            </label>
+            <label title="Fixed stake on EACH LOWER contract. Ignored while % of balance is ticked.">LOWER stake
+                <input type="number" id="tc-dn-stake" value="10" min="0.35" step="0.01" style="width:88px">
+            </label>
+            <label title="How many separate LOWER contracts">×
+                <input type="number" id="tc-dn-count" value="1" min="1" max="10" step="1" style="width:60px">
+            </label>
+            <label title="HIGHER goes this far above spot, LOWER the same distance below. The gateway caps barrier offsets at 2 decimal places.">Barrier offset
+                <input type="number" id="tc-offset" value="0.04" min="0.01" step="0.01" style="width:88px">
+            </label>
+            <label>Duration
+                <input type="number" id="tc-ticks" value="5" min="5" max="10" step="1" style="width:74px">
+                <span class="muted">ticks</span>
+            </label>
+            <label title="Delay between the first side and the second. 0 buys both in the same instant.">Stagger
+                <input type="number" id="tc-stagger" value="0" min="0" step="0.5" style="width:74px">
+                <span class="muted">sec</span>
+            </label>
+            <label title="Wait after a cycle settles before opening the next. This is the throttle: raise it to place fewer trades.">Gap
+                <input type="number" id="tc-gap" value="2" min="0" step="0.5" style="width:74px">
+                <span class="muted">sec</span>
+            </label>
+            <label title="Cycle A buys the stakes as configured. Cycle B mirrors them - the doubled side becomes LOWER and the single larger one goes on HIGHER.">
+                <input type="checkbox" id="tc-alternate"> Alternate A/B
+            </label>
+            <label title="Only open a cycle while the zigzag shows a trend (HH/HL or LH/LL). Sits out a ranging structure. Sensitivity is the chart's swing slider below.">
+                <input type="checkbox" id="tc-trend-only" checked> Trend only
+            </label>
+            <span class="muted" id="tc-effective">Barrier —</span>
+            <span class="muted" id="tc-stake-preview">—</span>
+        </div>
+
+        <p class="muted lead" style="margin-top:0">
+            With <strong>% of balance</strong> ticked, each contract is staked at that percentage
+            of the live account balance, rounded to a whole number and recalculated at every
+            cycle — it grows as the balance grows and shrinks as it falls. The fixed stake boxes
+            are ignored while it is on. <strong>Alternate A/B</strong> swaps which side carries
+            the extra contracts each cycle; it does nothing when both sides are equal.
+            <strong>Trend only</strong> holds fire while the zigzag reads as ranging and opens
+            a cycle only on HH/HL or LH/LL — both legs still go on, so it changes
+            <em>when</em> the bot trades, not which way it leans.
+        </p>
+
+        <div class="row buy-row">
+            <button id="tc-start" disabled>Arm tick cycle</button>
+            <button class="sec" id="tc-stop" disabled>Stop</button>
+            <span class="muted" id="tc-status">Connect with a token — this bot places real orders.</span>
+        </div>
+
+        <div class="stats tight">
+            <div class="cell"><div class="k">Phase</div><div class="v sm" id="tc-phase">Idle</div></div>
+            <div class="cell"><div class="k">Next cycle</div><div class="v sm" id="tc-next">—</div></div>
+            <div class="cell"><div class="k">Structure</div><div class="v sm" id="tc-structure">—</div></div>
+            <div class="cell"><div class="k">Sat out (range)</div><div class="v sm" id="tc-skipped">0</div></div>
+            <div class="cell" title="Contracts a cycle stopped waiting on. They are real positions that did settle at Deriv - the bot just never received the frame. Check the account if this is above zero."><div class="k">Unresolved</div><div class="v sm" id="tc-unresolved">0</div></div>
+        </div>
+
+        <!-- Trades are CYCLES, not contracts. The leg counters below are the
+             individual contracts inside them, which is why they run at a
+             multiple of the trade count. -->
+        <div class="stats">
+            <div class="cell"><div class="k">Trades</div><div class="v" id="tc-cycles">0</div></div>
+            <div class="cell"><div class="k">Legs won</div><div class="v up" id="tc-legs-won">0</div></div>
+            <div class="cell"><div class="k">Legs lost</div><div class="v dn" id="tc-legs-lost">0</div></div>
+            <div class="cell"><div class="k">A side won</div><div class="v sm up" id="tc-wins">0</div></div>
+            <div class="cell"><div class="k">Band — both lost</div><div class="v sm dn" id="tc-band">0</div></div>
+        </div>
+
+        <!-- With unequal stakes the two branches are worth different amounts, so
+             both are shown against the TOTAL staked across both sides. A branch
+             is positive only when that side's whole payout clears the whole
+             outlay — its own stake plus the other side's. -->
+        <div class="stats tight">
+            <div class="cell"><div class="k">Staked per cycle</div><div class="v sm" id="tc-staked">—</div></div>
+            <div class="cell"><div class="k">If HIGHER wins</div><div class="v sm" id="tc-branch-up">—</div></div>
+            <div class="cell"><div class="k">If LOWER wins</div><div class="v sm" id="tc-branch-dn">—</div></div>
+        </div>
+
+        <!-- Throughput, measured rather than assumed. The 10-tick contract is
+             the floor; the round trip and the re-entry tick are what it really
+             costs, and the gap between the two columns is that cost. -->
+        <div class="stats tight">
+            <div class="cell"><div class="k">Ticks per cycle</div><div class="v sm" id="tc-tpc">—</div></div>
+            <div class="cell"><div class="k">Measured rate</div><div class="v sm" id="tc-rate">—</div></div>
+            <div class="cell"><div class="k">Latency lost</div><div class="v sm" id="tc-latency">0 ticks</div></div>
+            <div class="cell"><div class="k">Rejections</div><div class="v sm" id="tc-rejections">0</div></div>
+        </div>
+
+        <div class="bidsum">
+            <span class="k">Band rate — exit finished inside ±offset and both legs lost</span>
+            <strong id="tc-bandrate">—</strong>
+            <span class="muted">
+                A cycle only profits when the winning side's total payout exceeds everything
+                staked on both sides. Watch the two branch figures above — if either is
+                negative, that outcome loses however often it lands.
+            </span>
+        </div>
+
+        <div class="bidsum">
+            <span class="k">Net across both legs, all completed cycles</span>
+            <strong id="tc-net" class="v sm">—</strong>
+            <span class="muted">Projected: <strong id="tc-projected" class="v sm">—</strong></span>
+        </div>
+    </section>
+
+    <!-- 4. Chart controls -------------------------------------------------- -->
+    <section class="card">
+        <h2>Chart</h2>
+        <div class="row">
+            <label>Timeframe
+                <select id="tf-select">
+                    <option value="1">1m</option>
+                    <option value="5">5m</option>
+                    <option value="15" selected>15m</option>
+                    <option value="60">1H</option>
+                </select>
+            </label>
+            <label title="Swing threshold as a multiple of the rolling spread">Swing sensitivity
+                <input type="range" id="th-slider" min="1" max="10" step="0.5" value="3">
+                <span id="th-val">3.0 spr</span>
+            </label>
+            <label>Window (ticks)
+                <input type="range" id="win-slider" min="200" max="2000" step="100" value="700">
+                <span id="win-val">700</span>
+            </label>
+            <label><input type="checkbox" id="ba" checked> Bid/Ask</label>
+            <label><input type="checkbox" id="show-swings" checked> Swings</label>
+            <button class="sec" id="clear-btn">Clear canvas</button>
+        </div>
+    </section>
+
+    <!-- 5. Live market stats ------------------------------------------------ -->
+    <div class="stats">
+        <div class="cell"><div class="k">Spot</div><div class="v" id="stat-spot">—</div></div>
+        <div class="cell"><div class="k">Ask</div><div class="v up" id="stat-ask">—</div></div>
+        <div class="cell"><div class="k">Bid</div><div class="v dn" id="stat-bid">—</div></div>
+        <div class="cell"><div class="k">Spread</div><div class="v" id="stat-spread">—</div></div>
+        <div class="cell"><div class="k">Ticks</div><div class="v" id="stat-ticks">0</div></div>
+        <!-- The zigzag still runs and the chart still draws swings, so these
+             stay live even though no bot reads them any more. The shared engine
+             writes to both unconditionally on every tick. -->
+        <div class="cell"><div class="k">Last pivot</div><div class="v" id="stat-last-pivot">—</div></div>
+        <div class="cell"><div class="k">Structure</div><div class="v" id="stat-bias">—</div></div>
+    </div>
+
+    <canvas id="chart-canvas" height="460"></canvas>
+
+    <!-- 6. Open contract ---------------------------------------------------- -->
+    <section class="card open-contract" id="open-panel" hidden>
+        <h2>Open contract</h2>
+        <div class="stats tight">
+            <div class="cell"><div class="k">Contract</div><div class="v sm" id="oc-type">—</div></div>
+            <div class="cell"><div class="k">Entry spot</div><div class="v sm" id="oc-entry">—</div></div>
+            <div class="cell"><div class="k">Barrier</div><div class="v sm" id="oc-barrier">—</div></div>
+            <div class="cell"><div class="k">Current</div><div class="v sm" id="oc-current">—</div></div>
+            <div class="cell"><div class="k">Remaining</div><div class="v sm" id="oc-remaining">—</div></div>
+            <div class="cell"><div class="k">Running P/L</div><div class="v sm" id="oc-pl">—</div></div>
+        </div>
+        <div class="verdict" id="oc-verdict">—</div>
+    </section>
+
+    <!-- 7. Session P/L ---------------------------------------------------- -->
+    <div class="stats">
+        <div class="cell"><div class="k">Net P/L</div><div class="v" id="stat-profit">0.00</div></div>
+    </div>
+
+</div>
+<script src="../deriv-api.js"></script>
+<script src="../trade-engine.js"></script>
+<script src="tick-cycle.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

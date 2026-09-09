@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Charsac Hedges — Band Cycle Bot</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <h1>Band Cycle <span class="tag">HIGHER · LOWER</span></h1>
+        <div class="sub">
+            Both legs at the candle open, both ride to expiry. <strong>HIGHER</strong> at
+            +offset and <strong>LOWER</strong> at −offset, bought together, held untouched.
+            No signal, no structure, no early exit — a candle opens, it trades, it counts
+            the cycle. Barrier offsets are capped at 2 decimal places by the gateway, so the
+            value actually sent is shown beside the inputs.
+            <a href="../HigherLower/">Higher/Lower →</a>
+            <a href="../RiseFall/">Rise/Fall →</a>
+            <a href="../TouchNoTouch/">Touch/No Touch →</a>
+        </div>
+    </header>
+
+    <!-- 1. Connection ------------------------------------------------------ -->
+    <section class="card">
+        <h2>Connection</h2>
+        <div class="row">
+            <input type="text" id="appid-input" placeholder="App ID (from /dashboard/create)" style="flex:1;min-width:180px">
+            <input type="password" id="token-input" placeholder="Personal Access Token (trade scope)" style="flex:2;min-width:220px">
+            <select id="account-select">
+                <option value="demo">Demo</option>
+                <option value="real">Real ⚠️</option>
+            </select>
+            <button id="connect-btn">Connect</button>
+            <button class="sec" id="preview-btn">Preview without token</button>
+        </div>
+        <div class="status-row">
+            <span id="connection-status" class="status-badge disconnected">Disconnected</span>
+            <span id="balance-display" class="muted">Balance: <strong>—</strong></span>
+        </div>
+        <div id="notice-bar" class="notice" hidden></div>
+    </section>
+
+    <!-- 2. Contract setup — manual reference path -------------------------- -->
+    <section class="card">
+        <h2>Contract — manual</h2>
+        <div class="row">
+            <label>Asset
+                <select id="asset-select">
+                    <option value="R_100">Volatility 100 Index</option>
+                </select>
+            </label>
+            <label>Duration
+                <input type="number" id="duration-input" value="60" min="5" step="1" style="width:74px">
+                <select id="unit-select">
+                    <option value="t">ticks</option>
+                    <option value="s" selected>seconds</option>
+                    <option value="m">minutes</option>
+                </select>
+            </label>
+            <label>Stake
+                <input type="number" id="stake-input" value="1" min="0.35" step="0.01" style="width:88px">
+                <span class="muted" id="currency-label">USD</span>
+            </label>
+            <span class="muted" id="duration-note"></span>
+        </div>
+
+        <div class="row barrier-row" id="barrier-row">
+            <label>Barrier offset
+                <input type="number" id="barrier-input" value="0.20" min="0" step="0.01" style="width:88px">
+            </label>
+            <label>Side
+                <select id="barrier-side">
+                    <option value="auto" selected>Auto — follows direction</option>
+                    <option value="+">Above spot (+)</option>
+                    <option value="-">Below spot (−)</option>
+                </select>
+            </label>
+            <span class="muted" id="barrier-preview">Barrier —</span>
+        </div>
+
+        <div class="quote-row">
+            <span class="muted">Live quote</span>
+            <span id="quote-up" class="quote up">▲ —</span>
+            <span id="quote-dn" class="quote dn">▼ —</span>
+            <span id="edge-badge" class="edge-badge" hidden>—</span>
+            <span class="muted" id="quote-note">Connect to price this contract.</span>
+        </div>
+
+        <div class="row buy-row">
+            <button class="buy up" id="buy-up-btn" disabled>▲ <span id="buy-up-label">HIGHER</span></button>
+            <button class="buy dn" id="buy-dn-btn" disabled>▼ <span id="buy-dn-label">LOWER</span></button>
+            <span class="muted">One leg at a time — this is the path the bot's orders travel down.</span>
+        </div>
+    </section>
+
+    <!-- 3. Band cycle bot -------------------------------------------------- -->
+    <section class="card hedge">
+        <h2>Band cycle — both legs, both ride</h2>
+        <p class="muted lead">
+            At each candle open it buys <strong>HIGHER</strong> at +offset and
+            <strong>LOWER</strong> at −offset in the same instant — real orders on the
+            connected account. Neither leg is sold, cut or hedged; both run to expiry.
+            Then it counts the cycle and waits for the next candle.
+            <strong>It does not stop on its own</strong> — no stop-loss, no take-profit,
+            no streak guard. Only Stop ends it.
+        </p>
+
+        <div class="row">
+            <label>Stake per leg
+                <input type="number" id="bc-stake" value="1" min="0.35" step="0.01" style="width:88px">
+            </label>
+            <label title="HIGHER goes this far above spot, LOWER the same distance below. The gateway caps barrier offsets at 2 decimal places.">Barrier offset
+                <input type="number" id="bc-offset" value="0.38" min="0.01" step="0.01" style="width:88px">
+            </label>
+            <label>Duration
+                <input type="number" id="bc-duration" value="45" min="15" step="1" style="width:74px">
+                <span class="muted">sec</span>
+            </label>
+            <label>Timeframe
+                <select id="bc-timeframe">
+                    <option value="1" selected>1m</option>
+                    <option value="2">2m</option>
+                    <option value="5">5m</option>
+                    <option value="15">15m</option>
+                </select>
+            </label>
+            <span class="muted" id="bc-effective">Barrier —</span>
+        </div>
+
+        <div class="row buy-row">
+            <button id="bc-start" disabled>Arm band cycle</button>
+            <button class="sec" id="bc-stop" disabled>Stop</button>
+            <span class="muted" id="bc-status">Connect with a token — this bot places real orders.</span>
+        </div>
+
+        <div class="stats tight">
+            <div class="cell"><div class="k">Phase</div><div class="v sm" id="bc-phase">Idle</div></div>
+            <div class="cell"><div class="k">Elapsed</div><div class="v sm" id="bc-clock">—</div></div>
+            <div class="cell"><div class="k">Cycles</div><div class="v sm" id="bc-cycles">0</div></div>
+            <div class="cell"><div class="k">HIGHER entry</div><div class="v sm up" id="bc-up-entry">—</div></div>
+            <div class="cell"><div class="k">HIGHER barrier</div><div class="v sm" id="bc-up-barrier">—</div></div>
+            <div class="cell"><div class="k">LOWER entry</div><div class="v sm dn" id="bc-dn-entry">—</div></div>
+            <div class="cell"><div class="k">LOWER barrier</div><div class="v sm" id="bc-dn-barrier">—</div></div>
+        </div>
+
+        <!-- Cycle outcomes. Exactly one of the first two, or the band. -->
+        <div class="stats tight">
+            <div class="cell"><div class="k">HIGHER won</div><div class="v sm up" id="bc-higher">0</div></div>
+            <div class="cell"><div class="k">LOWER won</div><div class="v sm dn" id="bc-lower">0</div></div>
+            <div class="cell"><div class="k">Band — both lost</div><div class="v sm" id="bc-band">0</div></div>
+        </div>
+
+        <div class="bidsum">
+            <span class="k">Band rate — how often the exit finished inside ±offset and both legs lost</span>
+            <strong id="bc-bandrate">—</strong>
+            <span class="muted">
+                This is what the offset costs. At offset 0 one leg always wins and the loss is
+                pure spread; every unit of offset buys a bigger winner and pays for it here.
+            </span>
+        </div>
+
+        <div class="bidsum">
+            <span class="k">Net across both legs, all booked cycles</span>
+            <strong id="bc-net" class="v sm">—</strong>
+        </div>
+    </section>
+
+    <!-- 4. Chart controls -------------------------------------------------- -->
+    <section class="card">
+        <h2>Chart</h2>
+        <div class="row">
+            <label>Timeframe
+                <select id="tf-select">
+                    <option value="1" selected>1m</option>
+                    <option value="5">5m</option>
+                    <option value="15">15m</option>
+                    <option value="60">1H</option>
+                </select>
+            </label>
+            <label title="Swing threshold as a multiple of the rolling spread">Swing sensitivity
+                <input type="range" id="th-slider" min="1" max="10" step="0.5" value="3">
+                <span id="th-val">3.0 spr</span>
+            </label>
+            <label>Window (ticks)
+                <input type="range" id="win-slider" min="200" max="2000" step="100" value="700">
+                <span id="win-val">700</span>
+            </label>
+            <label><input type="checkbox" id="ba" checked> Bid/Ask</label>
+            <label><input type="checkbox" id="show-swings"> Swings</label>
+            <button class="sec" id="clear-btn">Clear canvas</button>
+        </div>
+    </section>
+
+    <!-- 5. Live market stats ------------------------------------------------ -->
+    <div class="stats">
+        <div class="cell"><div class="k">Spot</div><div class="v" id="stat-spot">—</div></div>
+        <div class="cell"><div class="k">Ask</div><div class="v up" id="stat-ask">—</div></div>
+        <div class="cell"><div class="k">Bid</div><div class="v dn" id="stat-bid">—</div></div>
+        <div class="cell"><div class="k">Spread</div><div class="v" id="stat-spread">—</div></div>
+        <div class="cell"><div class="k">Ticks</div><div class="v" id="stat-ticks">0</div></div>
+        <div class="cell"><div class="k">Last pivot</div><div class="v" id="stat-last-pivot">—</div></div>
+        <div class="cell"><div class="k">Structure</div><div class="v" id="stat-bias">—</div></div>
+    </div>
+
+    <canvas id="chart-canvas" height="460"></canvas>
+
+    <!-- 6. Open contract — manual buys only --------------------------------- -->
+    <section class="card open-contract" id="open-panel" hidden>
+        <h2>Open contract</h2>
+        <div class="stats tight">
+            <div class="cell"><div class="k">Contract</div><div class="v sm" id="oc-type">—</div></div>
+            <div class="cell"><div class="k">Entry spot</div><div class="v sm" id="oc-entry">—</div></div>
+            <div class="cell"><div class="k">Barrier</div><div class="v sm" id="oc-barrier">—</div></div>
+            <div class="cell"><div class="k">Current</div><div class="v sm" id="oc-current">—</div></div>
+            <div class="cell"><div class="k">Remaining</div><div class="v sm" id="oc-remaining">—</div></div>
+            <div class="cell"><div class="k">Running P/L</div><div class="v sm" id="oc-pl">—</div></div>
+        </div>
+        <div class="verdict" id="oc-verdict">—</div>
+    </section>
+
+    <!-- 7. Session results — every contract, manual and bot ------------------ -->
+    <div class="stats">
+        <div class="cell"><div class="k">Trades</div><div class="v" id="stat-total">0</div></div>
+        <div class="cell"><div class="k">Wins</div><div class="v up" id="stat-wins">0</div></div>
+        <div class="cell"><div class="k">Losses</div><div class="v dn" id="stat-losses">0</div></div>
+        <div class="cell"><div class="k">Win rate</div><div class="v" id="stat-rate">—</div></div>
+        <div class="cell"><div class="k">Net P/L</div><div class="v" id="stat-profit">0.00</div></div>
+    </div>
+
+    <section class="card">
+        <h2>History</h2>
+        <table class="history">
+            <thead>
+                <tr>
+                    <th>ID</th><th>Contract</th><th>Entry</th><th>Barrier</th>
+                    <th>Exit</th><th>Result</th><th>P/L</th>
+                </tr>
+            </thead>
+            <tbody id="history-rows">
+                <tr class="empty"><td colspan="7">No trades yet.</td></tr>
+            </tbody>
+        </table>
+    </section>
+</div>
+<script src="../deriv-api.js"></script>
+<script src="../trade-engine.js"></script>
+<script src="band-cycle.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Charsac Technology — Swing Map (15m · 1m · 15s)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <h1>Charsac Technology — Swing Map</h1>
+        <div class="sub">
+            Raw ticks only. The 15m maps the swing highs and lows; 1m and 15s time the entry.
+            Trend is read from the labels alone — <b>HH/HL</b> up, <b>LH/LL</b> down. No BOS, no CHoCH, no candles.
+        </div>
+    </header>
+
+    <!-- Connection -->
+    <section class="card">
+        <h2>Asset</h2>
+        <div class="row">
+            <select id="asset-select" style="flex:2;min-width:220px">
+                <option value="R_100">Volatility 100 Index</option>
+                <option value="R_75">Volatility 75 Index</option>
+                <option value="R_50">Volatility 50 Index</option>
+                <option value="R_25">Volatility 25 Index</option>
+                <option value="R_10">Volatility 10 Index</option>
+            </select>
+            <button id="connect-btn">Connect &amp; Stream</button>
+            <button class="sec" id="clear-btn">Clear</button>
+            <button class="sec" id="export-btn">Export ticks CSV</button>
+        </div>
+        <div class="status-row">
+            <span id="connection-status" class="status-badge disconnected">Disconnected</span>
+            <span class="muted">Market data is public — no token required. Nothing here trades.</span>
+        </div>
+        <div id="notice-bar" class="notice" hidden></div>
+    </section>
+
+    <!-- Settings -->
+    <section class="card">
+        <h2>Swing settings</h2>
+        <div class="row">
+            <label title="How far back each panel reads, as a multiple of its own span. 20 means the 15m map covers 5 hours of ticks.">
+                Lookback
+                <input type="range" id="look-slider" min="6" max="40" step="1" value="20">
+                <span id="look-val" class="mono">20 ×</span>
+            </label>
+            <label title="How far price must retrace before a swing counts. Scales as tick sd × √ticks, so one slider stays meaningful on 15s and 15m at once.">
+                Swing filter
+                <input type="range" id="k-slider" min="0.15" max="1.5" step="0.05" value="0.50">
+                <span id="k-val" class="mono">0.50 × σ√n</span>
+            </label>
+            <label class="chk"><input type="checkbox" id="sound-chk" checked> Alert sound</label>
+            <button class="sec" id="freeze-btn">❚❚ Freeze view</button>
+        </div>
+    </section>
+
+    <!-- The verdict -->
+    <section class="align" id="align-panel">
+        <div class="align-head">
+            <div class="align-verdict" id="align-verdict">Waiting for data…</div>
+            <div class="align-meta" id="align-meta">—</div>
+        </div>
+        <div class="tfrow">
+            <div class="tfbadge" id="badge-15">
+                <div class="tfname">15m <span class="role">swing map — sets the trend</span></div>
+                <div class="tfbias" id="trend-15">—</div>
+                <div class="tfsw" id="sw-15">—</div>
+                <div class="tfpend" id="pend-15">—</div>
+            </div>
+            <div class="tfbadge" id="badge-1">
+                <div class="tfname">1m <span class="role">entry</span></div>
+                <div class="tfbias" id="trend-1">—</div>
+                <div class="tfsw" id="sw-1">—</div>
+                <div class="tfpend" id="pend-1">—</div>
+            </div>
+            <div class="tfbadge" id="badge-s">
+                <div class="tfname">15s <span class="role">trigger</span></div>
+                <div class="tfbias" id="trend-s">—</div>
+                <div class="tfsw" id="sw-s">—</div>
+                <div class="tfpend" id="pend-s">—</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Live metrics -->
+    <div class="stats">
+        <div class="cell"><div class="k">Spot</div><div class="v ac" id="stat-spot">—</div></div>
+        <div class="cell"><div class="k">Box open</div><div class="v" id="stat-open">—</div></div>
+        <div class="cell"><div class="k">Box high</div><div class="v up" id="stat-high">—</div></div>
+        <div class="cell"><div class="k">Box low</div><div class="v dn" id="stat-low">—</div></div>
+        <div class="cell"><div class="k">Box range (u)</div><div class="v" id="stat-range">—</div></div>
+        <div class="cell"><div class="k">Box closes in</div><div class="v" id="stat-left">—</div></div>
+        <div class="cell"><div class="k">Ticks in box</div><div class="v" id="stat-inbox">—</div></div>
+        <div class="cell"><div class="k">Tick interval</div><div class="v" id="stat-gap">—</div></div>
+        <div class="cell"><div class="k">Ticks held</div><div class="v" id="stat-ticks">0</div></div>
+        <div class="cell"><div class="k">Alignments</div><div class="v gold" id="stat-signals">0</div></div>
+    </div>
+
+    <!-- The current 15m box, tick by tick -->
+    <div class="secthead">The current 15m box, tick by tick
+        <span class="muted">— dotted lines are the 1m marks, solid the 5m; blue shading is the last 1m, gold the last 15s</span></div>
+    <canvas id="box-canvas" height="360"></canvas>
+
+    <!-- The swing maps -->
+    <div class="secthead">Swing maps
+        <span class="muted">— the two swings that set each reading are drawn larger; dashed lines are the prices that produce the next HH or LL</span></div>
+    <canvas id="tf15-canvas" height="200"></canvas>
+    <canvas id="tf1-canvas" height="200"></canvas>
+    <canvas id="tfs-canvas" height="200"></canvas>
+
+    <div class="leg">
+        <b>Everything here is the raw tick path.</b> No candles, no OHLC — the line is the actual sequence of quotes.
+        &nbsp;·&nbsp; ● <span class="up">green</span> = swing high, ● <span class="dn">red</span> = swing low.
+        A swing only counts once price has retraced by the <b>swing filter</b>, which scales as σ√n so the three
+        panels stay comparable.
+        &nbsp;·&nbsp; <b>The trend is the last two labels, nothing else:</b>
+        <span class="up">HH + HL</span> = bullish ·
+        <span class="dn">LH + LL</span> = bearish ·
+        <span style="color:#d4a017">HH + LL</span> = expanding, no trend ·
+        <span style="color:#a371f7">LH + HL</span> = contracting, no trend.
+        &nbsp;·&nbsp; The two mixed readings are the reason for reading a pair rather than one number — they let the
+        map say <i>there is no trend</i> instead of being forced to pick a side.
+        &nbsp;·&nbsp; Price beyond the last swing shows as <b style="color:#d4a017">forming</b>: it is on its way to a
+        new label but is <b>not counted until it retraces</b>, because until then it is not a swing.
+        &nbsp;·&nbsp; 1 <b>u</b> = <span id="unit-note" class="mono">—</span>.
+    </div>
+</div>
+<script>
+/*
+ * deriv-api.js is shared by every app in this folder, so it lives one level up.
+ * That path only resolves when the page is served with the Deriv folder as the
+ * server root. Serve from inside this subfolder instead and "../" sits above the
+ * root, 404s, and the only symptom is "DerivAPI is not defined" from app.js.
+ *
+ * So: try both locations, and if neither works say what is wrong on the page
+ * rather than leaving a bare ReferenceError in the console.
+ */
+(function () {
+    var paths = ['../deriv-api.js', 'deriv-api.js'];
+    var i = 0;
+
+    function tryNext() {
+        if (i >= paths.length) return explain();
+        var tag = document.createElement('script');
+        tag.src = paths[i++];
+        tag.onload = function () { window.DerivAPI ? boot() : tryNext(); };
+        tag.onerror = tryNext;
+        document.head.appendChild(tag);
+    }
+
+    function boot() {
+        var tag = document.createElement('script');
+        tag.src = 'app.js';
+        document.body.appendChild(tag);
+    }
+
+    function explain() {
+        var here = location.pathname.replace(/[^/]*$/, '');
+        var msg = document.createElement('div');
+        msg.style.cssText = 'margin:16px;padding:16px 18px;border:1px solid #f85149;' +
+            'border-radius:10px;background:#161b22;color:#c9d1d9;font:13px/1.7 ' +
+            '-apple-system,Segoe UI,Roboto,sans-serif;max-width:760px';
+        msg.innerHTML =
+            '<b style="color:#f85149;font-size:15px">Could not load deriv-api.js</b><br><br>' +
+            'It was not found at <code>../deriv-api.js</code> or <code>./deriv-api.js</code> ' +
+            'relative to <code>' + here + '</code>.<br><br>' +
+            '<b>Almost always this means the web server is rooted at this folder instead of ' +
+            'the <code>Deriv</code> folder above it.</b> The shared API client lives up there, ' +
+            'so it is outside what the server will serve.<br><br>' +
+            '<b>Fix — serve from the Deriv folder:</b><br>' +
+            '<pre style="background:#0d1117;border:1px solid #30363d;border-radius:6px;' +
+            'padding:10px;overflow:auto;margin:8px 0"><code>cd c:/Users/Dell/Desktop/Deriv<br>' +
+            'python -m http.server 8000</code></pre>' +
+            'then open <code>http://localhost:8000/StructureAlign/</code><br><br>' +
+            'In VS Code, open the <b>Deriv</b> folder as the workspace before starting Live Server ' +
+            '— not this subfolder.<br><br>' +
+            '<span style="color:#8b949e">Opening the file directly with a <code>file://</code> URL ' +
+            'will not work either: the WebSocket needs an http origin.</span>';
+        document.body.appendChild(msg);
+    }
+
+    tryNext();
+})();
+</script>
+</body>
+</html>

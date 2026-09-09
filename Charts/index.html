@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Charsac Hedges — Native Live Tick Plotter</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <h1>Charsac Technology — Live Market Structure Plotter</h1>
+        <div class="sub">Streaming live tick-by-tick data from Deriv WebSockets. Continuous tick lines, spreads, and real-time structure tracing.</div>
+    </header>
+
+    <!-- Connection Card -->
+    <section class="card config-panel">
+        <h2>Asset</h2>
+        <div class="row">
+            <select id="asset-select" style="flex: 2;">
+                <option value="R_100">Volatility 100 Index</option>
+                <option value="R_75">Volatility 75 Index</option>
+                <option value="R_50">Volatility 50 Index</option>
+                <option value="R_25">Volatility 25 Index</option>
+                <option value="R_10">Volatility 10 Index</option>
+            </select>
+            <button id="connect-btn">Connect &amp; Stream</button>
+        </div>
+        <div class="status-row">
+            <span id="connection-status" class="status-badge disconnected">Disconnected</span>
+            <span class="muted">Market data is public — no token required.</span>
+        </div>
+        <div id="notice-bar" class="notice" hidden></div>
+    </section>
+
+    <!-- Chart Configuration Controls -->
+    <section class="card controls-panel">
+        <div class="row">
+            <label>Timeframe 
+                <select id="tf-select">
+                    <option value="1">1m</option>
+                    <option value="5">5m</option>
+                    <option value="15" selected>15m</option>
+                    <option value="60">1H</option>
+                </select>
+            </label>
+            <label title="Swing Filter threshold multiplier">Swing Sensitivity
+                <input type="range" id="th-slider" min="1" max="10" step="0.5" value="3">
+                <span id="th-val">3.0 spr</span>
+            </label>
+            <label>Window (Ticks)
+                <input type="range" id="win-slider" min="200" max="2000" step="100" value="700">
+                <span id="win-val">700</span>
+            </label>
+            <label><input type="checkbox" id="ba" checked> Show Bid/Ask</label>
+            <button class="sec" id="clear-btn">Clear Canvas</button>
+        </div>
+    </section>
+
+    <!-- Live Metrics Panel -->
+    <div class="stats">
+        <div class="cell"><div class="k">Active Spot</div><div class="v" id="stat-spot">—</div></div>
+        <div class="cell"><div class="k">Live Ask</div><div class="v up" id="stat-ask">—</div></div>
+        <div class="cell"><div class="k">Live Bid</div><div class="v dn" id="stat-bid">—</div></div>
+        <div class="cell"><div class="k">Spread</div><div class="v" id="stat-spread">—</div></div>
+        <div class="cell"><div class="k">Ticks Streamed</div><div class="v" id="stat-ticks">0</div></div>
+        <div class="cell"><div class="k">Last Pivot</div><div class="v" id="stat-last-pivot">—</div></div>
+    </div>
+
+    <!-- Native HTML5 Tick Line Canvas -->
+    <canvas id="chart-canvas" height="450"></canvas>
+</div>
+<script src="../deriv-api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

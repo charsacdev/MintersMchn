@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deriv Charsac Hedges Bot (Educational)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Deriv Digit Bot</h1>
+            <p class="subtitle">Educational Demo Platform</p>
+        </header>
+
+        <!-- Connection Settings -->
+        <section class="card config-panel">
+            <h2>Authentication</h2>
+            <div class="input-group">
+                <input type="text" id="appid-input" placeholder="App ID" autocomplete="off" style="max-width: 9rem;">
+                <input type="password" id="token-input" placeholder="Personal Access Token (trade scope)" autocomplete="off">
+                <select id="account-select" title="Which account the OTP is issued for">
+                    <option value="demo" selected>Demo</option>
+                    <option value="real">Real ⚠️</option>
+                </select>
+                <button id="connect-btn">Connect</button>
+            </div>
+            <div class="input-group">
+                <button id="preview-btn" class="btn-secondary">Preview without token (live prices only)</button>
+            </div>
+            <p class="hint">
+                You need <strong>both</strong>, from the same Deriv account:
+                <a href="https://home.deriv.com/dashboard/create" target="_blank" rel="noopener">an App ID</a>
+                and
+                <a href="https://home.deriv.com/dashboard/tokens/create" target="_blank" rel="noopener">a Personal Access Token</a>
+                with the <code>trade</code> scope. A token alone gives
+                <code>Invalid application</code>. The App ID is remembered; the token is not.
+            </p>
+            <div class="status-row">
+                <span id="connection-status" class="status-badge disconnected">Disconnected</span>
+                <span id="balance-display">Balance: <strong>—</strong></span>
+            </div>
+            <div id="notice-bar" class="notice" hidden></div>
+        </section>
+
+        <!-- Bot Controls -->
+        <section class="card controls-panel">
+            <h2>Bot Controller</h2>
+            <div class="control-row">
+                <div class="form-field">
+                    <label for="asset-select">Asset Symbol</label>
+                    <select id="asset-select">
+                        <option value="R_100">Volatility 100 Index</option>
+                        <option value="R_75">Volatility 75 Index</option>
+                        <option value="R_50">Volatility 50 Index</option>
+                        <option value="R_25">Volatility 25 Index</option>
+                        <option value="R_10">Volatility 10 Index</option>
+                    </select>
+                </div>
+                <div class="form-field">
+                    <label for="contract-select">Contract</label>
+                    <select id="contract-select">
+                        <option value="DIGITODD" selected>Digit Odd</option>
+                        <option value="DIGITEVEN">Digit Even</option>
+                    </select>
+                </div>
+                <div class="form-field">
+                    <label for="stake-input">Stake</label>
+                    <input type="number" id="stake-input" value="1.00" step="0.5" min="0.35">
+                </div>
+                <div class="form-field">
+                    <label for="ticks-input">Duration (Ticks)</label>
+                    <input type="number" id="ticks-input" value="5" min="1" max="10" step="1">
+                </div>
+            </div>
+            <div class="action-buttons">
+                <button id="start-btn" disabled class="btn-start">Start Bot</button>
+                <button id="stop-btn" disabled class="btn-stop">Stop Bot</button>
+            </div>
+        </section>
+
+        <!-- Stats & History Grid -->
+        <div class="dashboard-grid">
+            <section class="card summary-panel">
+                <h2>Performance Details</h2>
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <span class="stat-label">Total Trades</span>
+                        <span id="stat-total" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Wins</span>
+                        <span id="stat-wins" class="stat-value win-text">0</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Losses</span>
+                        <span id="stat-losses" class="stat-value loss-text">0</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Profit/Loss</span>
+                        <span id="stat-profit" class="stat-value">0.00</span>
+                    </div>
+                </div>
+                <div class="tick-stream-box">
+                    <span>Last Tick: </span><strong id="last-tick">—</strong>
+                </div>
+            </section>
+
+            <section class="card history-panel">
+                <h2>Transaction History</h2>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Contract ID</th>
+                                <th>Type</th>
+                                <th>Status</th>
+                                <th>Profit/Loss</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-rows"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="deriv-api.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
